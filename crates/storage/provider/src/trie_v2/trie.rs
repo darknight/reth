@@ -140,16 +140,15 @@ mod tests {
         database::Database, mdbx::test_utils::create_test_rw_db, tables, transaction::DbTxMut,
     };
     use reth_primitives::{keccak256, proofs::KeccakHasher, Address};
-    use reth_rlp::encode_fixed_size;
-    use std::collections::HashMap;
-
     use reth_primitives::{Account, H256, U256};
+    use reth_rlp::encode_fixed_size;
+    use std::collections::BTreeMap;
 
     fn insert_account<'a, TX: DbTxMut<'a>>(
         tx: &mut TX,
         address: Address,
         account: Account,
-        storage: &HashMap<H256, U256>,
+        storage: &BTreeMap<H256, U256>,
     ) {
         let hashed_address = keccak256(address);
         tx.put::<tables::HashedAccount>(hashed_address, account).unwrap();
@@ -171,7 +170,7 @@ mod tests {
 
     #[test]
     fn arbitrary_storage_root() {
-        proptest!(ProptestConfig::with_cases(1), |(item: (Address, std::collections::BTreeMap<H256, U256>))| {
+        proptest!(ProptestConfig::with_cases(10), |(item: (Address, std::collections::BTreeMap<H256, U256>))| {
             let (address, storage) = item;
 
             let hashed_address = keccak256(address);
@@ -186,21 +185,20 @@ mod tests {
             }
             tx.commit().unwrap();
 
-            let got = StorageRoot::new(db.tx().unwrap(), address).root().unwrap();
+            let got = StorageRoot::new(&db.tx().unwrap(), address).root().unwrap();
             let expected = storage_root(storage.into_iter());
-            dbg!(&got, &expected);
             assert_eq!(expected, got);
         });
     }
 
     #[test]
-    // This ensures that the walker goes over all the accounts.
+    // This ensures that the walker goes over all the storage slots
     fn test_storage_root() {
         let db = create_test_rw_db();
         let mut tx = Transaction::new(db.as_ref()).unwrap();
 
         let address = Address::random();
-        let storage = HashMap::from([
+        let storage = BTreeMap::from([
             (H256::zero(), U256::from(3)),
             (H256::from_low_u64_be(2), U256::from(1)),
         ]);
@@ -215,7 +213,7 @@ mod tests {
         insert_account(&mut *tx, address, account, &storage);
         tx.commit().unwrap();
 
-        let got = StorageRoot::new(db.tx().unwrap(), address).root().unwrap();
+        let got = StorageRoot::new(&db.tx().unwrap(), address).root().unwrap();
 
         assert_eq!(storage_root(storage.into_iter()), got);
     }
