@@ -3,6 +3,7 @@ use reth_db::{database::Database, tables, transaction::DbTx};
 use reth_interfaces::consensus;
 use reth_provider::{
     trie::{DBTrieLoader, TrieProgress},
+    trie_v2::trie::StateRoot,
     Transaction,
 };
 use std::{fmt::Debug, ops::DerefMut};
@@ -112,16 +113,20 @@ impl<DB: Database> Stage<DB> for MerkleStage {
             let res = if to_transition - from_transition > threshold || stage_progress == 0 {
                 debug!(target: "sync::stages::merkle::exec", current = ?stage_progress, target = ?previous_stage_progress, "Rebuilding trie");
                 // if there are more blocks than threshold it is faster to rebuild the trie
-                let mut loader = DBTrieLoader::new(tx.deref_mut());
-                loader.calculate_root().map_err(|e| StageError::Fatal(Box::new(e)))?
+                let loader = StateRoot::new(tx.deref_mut());
+                let root = loader.root().map_err(|e| StageError::Fatal(Box::new(e)))?;
+                TrieProgress::Complete(root)
             } else {
-                debug!(target: "sync::stages::merkle::exec", current = ?stage_progress, target = ?previous_stage_progress, "Updating trie");
-                // Iterate over changeset (similar to Hashing stages) and take new values
-                let current_root = tx.get_header(stage_progress)?.state_root;
-                let mut loader = DBTrieLoader::new(tx.deref_mut());
-                loader
-                    .update_root(current_root, from_transition..to_transition)
-                    .map_err(|e| StageError::Fatal(Box::new(e)))?
+                // TODO: Replace this with incremental hash calculation
+                unimplemented!("Incremental trie building is not implemented yet");
+                // debug!(target: "sync::stages::merkle::exec", current = ?stage_progress, target =
+                // ?previous_stage_progress, "Updating trie"); // Iterate over
+                // changeset (similar to Hashing stages) and take new values
+                // let current_root = tx.get_header(stage_progress)?.state_root;
+                // let mut loader = DBTrieLoader::new(tx.deref_mut());
+                // loader
+                //     .update_root(current_root, from_transition..to_transition)
+                //     .map_err(|e| StageError::Fatal(Box::new(e)))?
             };
 
             match res {

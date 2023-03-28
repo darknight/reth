@@ -12,7 +12,7 @@ use super::{account::EthAccount, nibbles::Nibbles};
 use reth_db::{
     cursor::{DbCursorRO, DbDupCursorRO},
     tables,
-    transaction::DbTx,
+    transaction::{DbTx, DbTxMut},
     Error as DbError,
 };
 use reth_primitives::{keccak256, proofs::EMPTY_ROOT, Address, StorageEntry, H256};
@@ -23,7 +23,7 @@ pub struct StateRoot<'a, TX> {
     pub tx: &'a TX,
 }
 
-impl<'a, TX: DbTx<'a>> StateRoot<'a, TX> {
+impl<'a, TX> StateRoot<'a, TX> {
     pub fn new(tx: &'a TX) -> Self {
         Self { tx }
     }
@@ -37,7 +37,7 @@ pub enum StateRootError {
     StorageRootError(#[from] StorageRootError),
 }
 
-impl<'a, TX: DbTx<'a>> StateRoot<'a, TX> {
+impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
     /// Walks the entire hashed storage table entry for the given address and calculates the storage
     /// root
     #[tracing::instrument(skip(self))]
@@ -82,7 +82,7 @@ pub struct StorageRoot<'a, TX> {
     pub hashed_address: H256,
 }
 
-impl<'a, TX: DbTx<'a>> StorageRoot<'a, TX> {
+impl<'a, TX> StorageRoot<'a, TX> {
     /// Creates a new storage root calculator given an address
     pub fn new(tx: &'a TX, address: Address) -> Self {
         Self::new_hashed(tx, keccak256(&address))
@@ -100,7 +100,7 @@ pub enum StorageRootError {
     DB(#[from] DbError),
 }
 
-impl<'a, TX: DbTx<'a>> StorageRoot<'a, TX> {
+impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StorageRoot<'a, TX> {
     /// Walks the entire hashed storage table entry for the given address and calculates the storage
     /// root
     #[tracing::instrument(skip(self))]
@@ -133,12 +133,10 @@ mod tests {
     use super::*;
     use crate::Transaction;
     use proptest::{prelude::ProptestConfig, proptest};
-    use reth_db::{
-        database::Database, mdbx::test_utils::create_test_rw_db, tables, transaction::DbTxMut,
-    };
+    use reth_db::{mdbx::test_utils::create_test_rw_db, tables, transaction::DbTxMut};
     use reth_primitives::{keccak256, proofs::KeccakHasher, Account, Address, H256, U256};
     use reth_rlp::encode_fixed_size;
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, ops::DerefMut};
 
     fn insert_account<'a, TX: DbTxMut<'a>>(
         tx: &mut TX,
@@ -197,7 +195,7 @@ mod tests {
             }
             tx.commit().unwrap();
 
-            let got = StorageRoot::new(&db.tx().unwrap(), address).root().unwrap();
+            let got = StorageRoot::new(tx.deref_mut(), address).root().unwrap();
             let expected = storage_root(storage.into_iter());
             assert_eq!(expected, got);
         });
@@ -225,7 +223,7 @@ mod tests {
         insert_account(&mut *tx, address, account, &storage);
         tx.commit().unwrap();
 
-        let got = StorageRoot::new(&db.tx().unwrap(), address).root().unwrap();
+        let got = StorageRoot::new(tx.deref_mut(), address).root().unwrap();
 
         assert_eq!(storage_root(storage.into_iter()), got);
     }
@@ -263,7 +261,7 @@ mod tests {
         tx.commit().unwrap();
         let expected = state_root(state.into_iter());
 
-        let got = StateRoot::new(&db.tx().unwrap()).root().unwrap();
+        let got = StateRoot::new(tx.deref_mut()).root().unwrap();
         assert_eq!(expected, got);
     }
 }
