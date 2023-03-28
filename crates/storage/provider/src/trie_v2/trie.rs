@@ -24,15 +24,20 @@ use thiserror::Error;
 // For each element:
 // 1. If its value is 0, delete it from the Hashed table
 // 2. Nibble(key) & Some(rlp(value)) or None
-pub struct StorageRoot<TX> {
-    pub tx: TX,
-    pub address: Address,
+pub struct StorageRoot<'a, TX> {
+    pub tx: &'a TX,
+    pub hashed_address: H256,
 }
 
-impl<'a, TX: DbTx<'a>> StorageRoot<TX> {
-    /// Creates a new storage root calculator
-    pub fn new(tx: TX, address: Address) -> Self {
-        Self { tx, address }
+impl<'a, TX: DbTx<'a>> StorageRoot<'a, TX> {
+    /// Creates a new storage root calculator given an address
+    pub fn new(tx: &'a TX, address: Address) -> Self {
+        Self::new_hashed(tx, keccak256(&address))
+    }
+
+    /// Creates a new storage root calculator given an address
+    pub fn new_hashed(tx: &'a TX, hashed_address: H256) -> Self {
+        Self { tx, hashed_address }
     }
 }
 
@@ -42,22 +47,28 @@ pub enum StorageRootError {
     DB(#[from] DbError),
 }
 
-impl<'a, TX: DbTx<'a>> StorageRoot<TX> {
+impl<'a, TX: DbTx<'a>> StorageRoot<'a, TX> {
     /// Walks the entire hashed storage table entry for the given address and calculates the storage
     /// root
+    #[tracing::instrument(skip(self), fields(hashed_address = ?self.hashed_address))]
     pub fn root(&self) -> Result<H256, StorageRootError> {
+        tracing::debug!(target: "loader", "calculating storage root");
+
         // Instantiate the walker
         let mut cursor = self.tx.cursor_dup_read::<tables::HashedStorage>()?;
-        let hashed_address = keccak256(self.address);
-        let mut walker = cursor.walk_dup(Some(hashed_address), None)?;
+        let mut entry = cursor.seek_by_key_subkey(self.hashed_address, H256::zero())?;
 
         let mut hash_builder = HashBuilder::new();
-        while let Some(item) = walker.next() {
-            let (hashed_address, entry) = item?;
-            let StorageEntry { key: hashed_slot, value } = entry;
+
+        while let Some(StorageEntry { key: hashed_slot, value }) = entry {
+            tracing::trace!(target: "loader", ?hashed_slot, ?value, "adding leaf");
 
             let nibbles = Nibbles::unpack(hashed_slot);
             hash_builder.add_leaf(nibbles, reth_rlp::encode_fixed_size(&value).as_ref());
+
+            // Should be able to use walk_dup, but any call to next() causes an assert fail in
+            // mdbx.c
+            entry = cursor.next_dup()?.map(|(_, v)| v);
         }
 
         let root = hash_builder.root();
