@@ -7,17 +7,71 @@
 
 use crate::trie_v2::hash_builder::HashBuilder;
 
-use super::nibbles::Nibbles;
+use super::{account::EthAccount, nibbles::Nibbles};
 
 use reth_db::{
-    cursor::DbDupCursorRO,
+    cursor::{DbCursorRO, DbDupCursorRO},
     tables,
     transaction::{DbTx, DbTxMut},
     Error as DbError,
 };
-use reth_primitives::{keccak256, Address, StorageEntry, H256};
+use reth_primitives::{keccak256, proofs::EMPTY_ROOT, Address, StorageEntry, H256};
+use reth_rlp::Encodable;
 use std::error::Error;
 use thiserror::Error;
+
+pub struct StateRoot<'a, TX> {
+    pub tx: &'a TX,
+}
+
+impl<'a, TX: DbTx<'a>> StateRoot<'a, TX> {
+    pub fn new(tx: &'a TX) -> Self {
+        Self { tx }
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum StateRootError {
+    #[error(transparent)]
+    DB(#[from] DbError),
+    #[error(transparent)]
+    StorageRootError(#[from] StorageRootError),
+}
+
+impl<'a, TX: DbTx<'a>> StateRoot<'a, TX> {
+    /// Walks the entire hashed storage table entry for the given address and calculates the storage
+    /// root
+    #[tracing::instrument(skip(self))]
+    pub fn root(&self) -> Result<H256, StateRootError> {
+        tracing::debug!(target: "loader", "calculating state root");
+        // Instantiate the walker
+        let mut cursor = self.tx.cursor_read::<tables::HashedAccount>()?;
+        let mut walker = cursor.walk(None)?;
+
+        let mut hash_builder = HashBuilder::new();
+        while let Some(item) = walker.next() {
+            let (hashed_address, account) = item?;
+            tracing::trace!(target: "loader", ?hashed_address, "merklizing account");
+
+            let storage_root = if account.has_bytecode() {
+                StorageRoot::new_hashed(self.tx, hashed_address).root()?
+            } else {
+                EMPTY_ROOT
+            };
+
+            let account = EthAccount::from(account).with_storage_root(storage_root);
+            let mut account_rlp = Vec::with_capacity(account.length());
+            account.encode(&mut account_rlp);
+
+            let nibbles = Nibbles::unpack(hashed_address);
+            hash_builder.add_leaf(nibbles, &account_rlp);
+        }
+
+        let root = hash_builder.root();
+
+        Ok(root)
+    }
+}
 
 // Create a walker at a specific prefix on the database.
 // Pass a cursor to the hashed storage table (or hashed account later)
