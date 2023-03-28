@@ -48,6 +48,8 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
         let mut walker = cursor.walk(None)?;
 
         let mut hash_builder = HashBuilder::new();
+
+        let mut progress = 0;
         while let Some(item) = walker.next() {
             let (hashed_address, account) = item?;
             tracing::trace!(target: "loader", ?hashed_address, "merklizing account");
@@ -64,6 +66,14 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
 
             let nibbles = Nibbles::unpack(hashed_address);
             hash_builder.add_leaf(nibbles, &account_rlp);
+
+            progress += 1;
+
+            // there's about 50M accounts hashed, so we want to report every 1%
+            // 2 / 100M
+            if progress % 500_000 == 0 {
+                println!("Accounts Merklized so far: {}", progress);
+            }
         }
 
         let root = hash_builder.root();
