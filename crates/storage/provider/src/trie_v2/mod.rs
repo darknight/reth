@@ -12,3 +12,5 @@ pub mod trie;
 pub mod hash_builder;
 
 pub mod account;
+
+pub mod cursor;

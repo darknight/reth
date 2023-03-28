@@ -290,6 +290,11 @@ dupsort!(
 
 table!(
     /// Stores the current state's Merkle Patricia Tree.
+    ( AccountsTrie2 ) Vec<u8> | Vec<u8>
+);
+
+table!(
+    /// Stores the current state's Merkle Patricia Tree.
     ( AccountsTrie ) H256 | Vec<u8>
 );
 
