@@ -96,7 +96,7 @@ impl Nibbles {
         let n = (nibbles.len() + 1) / 2;
         let mut out = vec![0u8; n];
         if n == 0 {
-            return out;
+            return out
         }
 
         let mut i = 0;
@@ -288,7 +288,7 @@ impl Nibbles {
         let len = std::cmp::min(self.len(), other.len());
         for i in 0..len {
             if self[i] != other[i] {
-                return i;
+                return i
             }
         }
         len
@@ -300,7 +300,7 @@ impl Nibbles {
         let mut i = 0usize;
         while i < s {
             if self.at(i) != other_partial.at(i) {
-                break;
+                break
             }
             i += 1;
         }

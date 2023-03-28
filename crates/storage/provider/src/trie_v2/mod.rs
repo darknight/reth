@@ -10,3 +10,5 @@ pub mod node;
 pub mod trie;
 
 pub mod hash_builder;
+
+mod account;
