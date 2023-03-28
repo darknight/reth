@@ -11,4 +11,4 @@ pub mod trie;
 
 pub mod hash_builder;
 
-mod account;
+pub mod account;

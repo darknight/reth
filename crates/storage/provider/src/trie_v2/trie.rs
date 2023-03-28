@@ -12,12 +12,11 @@ use super::{account::EthAccount, nibbles::Nibbles};
 use reth_db::{
     cursor::{DbCursorRO, DbDupCursorRO},
     tables,
-    transaction::{DbTx, DbTxMut},
+    transaction::DbTx,
     Error as DbError,
 };
 use reth_primitives::{keccak256, proofs::EMPTY_ROOT, Address, StorageEntry, H256};
 use reth_rlp::Encodable;
-use std::error::Error;
 use thiserror::Error;
 
 pub struct StateRoot<'a, TX> {
@@ -104,9 +103,9 @@ pub enum StorageRootError {
 impl<'a, TX: DbTx<'a>> StorageRoot<'a, TX> {
     /// Walks the entire hashed storage table entry for the given address and calculates the storage
     /// root
-    #[tracing::instrument(skip(self), fields(hashed_address = ?self.hashed_address))]
+    #[tracing::instrument(skip(self))]
     pub fn root(&self) -> Result<H256, StorageRootError> {
-        tracing::debug!(target: "loader", "calculating storage root");
+        tracing::debug!(target: "loader", hashed_address = ?self.hashed_address, "calculating storage root");
 
         // Instantiate the walker
         let mut cursor = self.tx.cursor_dup_read::<tables::HashedStorage>()?;
@@ -115,8 +114,6 @@ impl<'a, TX: DbTx<'a>> StorageRoot<'a, TX> {
         let mut hash_builder = HashBuilder::new();
 
         while let Some(StorageEntry { key: hashed_slot, value }) = entry {
-            tracing::trace!(target: "loader", ?hashed_slot, ?value, "adding leaf");
-
             let nibbles = Nibbles::unpack(hashed_slot);
             hash_builder.add_leaf(nibbles, reth_rlp::encode_fixed_size(&value).as_ref());
 
@@ -139,8 +136,7 @@ mod tests {
     use reth_db::{
         database::Database, mdbx::test_utils::create_test_rw_db, tables, transaction::DbTxMut,
     };
-    use reth_primitives::{keccak256, proofs::KeccakHasher, Address};
-    use reth_primitives::{Account, H256, U256};
+    use reth_primitives::{keccak256, proofs::KeccakHasher, Account, Address, H256, U256};
     use reth_rlp::encode_fixed_size;
     use std::collections::BTreeMap;
 
@@ -160,6 +156,22 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    fn state_root<I, S>(accounts: I) -> H256
+    where
+        I: Iterator<Item = (Address, (Account, S))>,
+        S: IntoIterator<Item = (H256, U256)>,
+    {
+        let encoded_accounts = accounts.into_iter().map(|(address, (account, storage))| {
+            let storage_root =
+                if account.has_bytecode() { storage_root(storage.into_iter()) } else { EMPTY_ROOT };
+            let mut out = Vec::new();
+            EthAccount::from(account).with_storage_root(storage_root).encode(&mut out);
+            (address, out)
+        });
+
+        triehash::sec_trie_root::<KeccakHasher, _, _, _>(encoded_accounts)
     }
 
     fn storage_root<I: Iterator<Item = (H256, U256)>>(storage: I) -> H256 {
@@ -216,5 +228,42 @@ mod tests {
         let got = StorageRoot::new(&db.tx().unwrap(), address).root().unwrap();
 
         assert_eq!(storage_root(storage.into_iter()), got);
+    }
+
+    type State = BTreeMap<Address, (Account, BTreeMap<H256, U256>)>;
+
+    #[test]
+    fn arbitrary_state_root() {
+        proptest!(
+            ProptestConfig::with_cases(10), | (state: State) | {
+                // set the bytecodehash for the accounts so that storage root is computed
+                // this is needed because proptest will generate accs with empty bytecodehash
+                // but non-empty storage, which is obviously invalid
+                let state = state
+                    .into_iter()
+                    .map(|(addr, (mut acc, storage))| {
+                        if !storage.is_empty() {
+                            acc.bytecode_hash = Some(H256::random());
+                        }
+                        (addr, (acc, storage))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                test_state_root_with_state(state)
+            }
+        );
+    }
+
+    fn test_state_root_with_state(state: State) {
+        let db = create_test_rw_db();
+        let mut tx = Transaction::new(db.as_ref()).unwrap();
+
+        for (address, (account, storage)) in &state {
+            insert_account(&mut *tx, *address, *account, storage)
+        }
+        tx.commit().unwrap();
+        let expected = state_root(state.into_iter());
+
+        let got = StateRoot::new(&db.tx().unwrap()).root().unwrap();
+        assert_eq!(expected, got);
     }
 }
