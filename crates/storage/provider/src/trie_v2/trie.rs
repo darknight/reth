@@ -56,6 +56,10 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
             let (hashed_address, account) = item?;
             tracing::trace!(target: "loader", ?hashed_address, "merklizing account");
 
+            if account.is_empty() {
+                continue
+            }
+
             let storage_root = if account.has_bytecode() {
                 StorageRoot::new_hashed(self.tx, hashed_address).root()?
             } else {
@@ -128,7 +132,6 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StorageRoot<'a, TX> {
 
         let (branch_node_tx, mut branch_node_rx) = mpsc::unbounded_channel();
         let mut hash_builder = HashBuilder::default().with_store_tx(branch_node_tx);
-
         while let Some(StorageEntry { key: hashed_slot, value }) = entry {
             let nibbles = Nibbles::unpack(hashed_slot);
             hash_builder.add_leaf(nibbles, reth_rlp::encode_fixed_size(&value).as_ref());
@@ -184,12 +187,15 @@ mod tests {
         I: Iterator<Item = (Address, (Account, S))>,
         S: IntoIterator<Item = (H256, U256)>,
     {
-        let encoded_accounts = accounts.into_iter().map(|(address, (account, storage))| {
+        let encoded_accounts = accounts.into_iter().filter_map(|(address, (account, storage))| {
+            if account.is_empty() {
+                return None
+            }
             let storage_root =
                 if account.has_bytecode() { storage_root(storage.into_iter()) } else { EMPTY_ROOT };
             let mut out = Vec::new();
             EthAccount::from(account).with_storage_root(storage_root).encode(&mut out);
-            (address, out)
+            Some((address, out))
         });
 
         triehash::sec_trie_root::<KeccakHasher, _, _, _>(encoded_accounts)
@@ -222,6 +228,55 @@ mod tests {
             let expected = storage_root(storage.into_iter());
             assert_eq!(expected, got);
         });
+    }
+
+    #[test]
+    // This ensures we dont add empty accounts to the trie
+    fn test_empty_account() {
+        let state: State = BTreeMap::from([
+            (
+                Address::random(),
+                (
+                    Account { nonce: 0, balance: U256::from(0), bytecode_hash: None },
+                    BTreeMap::default(),
+                ),
+            ),
+            (
+                Address::random(),
+                (
+                    Account {
+                        nonce: 155,
+                        balance: U256::from(414241124u32),
+                        bytecode_hash: Some(keccak256("test")),
+                    },
+                    BTreeMap::from([
+                        (H256::zero(), U256::from(3)),
+                        (H256::from_low_u64_be(2), U256::from(1)),
+                    ]),
+                ),
+            ),
+        ]);
+        test_state_root_with_state(state);
+    }
+
+    #[test]
+    // This ensures we return an empty root when there are no storage entries
+    fn test_empty_storage_root() {
+        let db = create_test_rw_db();
+        let mut tx = Transaction::new(db.as_ref()).unwrap();
+
+        let address = Address::random();
+        let code = "el buen fla";
+        let account = Account {
+            nonce: 155,
+            balance: U256::from(414241124u32),
+            bytecode_hash: Some(keccak256(code)),
+        };
+        insert_account(&mut *tx, address, account, &Default::default());
+        tx.commit().unwrap();
+
+        let got = StorageRoot::new(tx.deref_mut(), address).root().unwrap();
+        assert_eq!(got, EMPTY_ROOT);
     }
 
     #[test]
