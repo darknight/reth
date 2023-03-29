@@ -1,9 +1,7 @@
 use super::node::{BranchNodeCompact, BranchNodeCompact as Node};
 use reth_db::{
-    cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW},
-    tables,
-    transaction::{DbTx, DbTxMut},
-    Error as DbError,
+    cursor::{DbCursorRO, DbCursorRW},
+    tables, Error as DbError,
 };
 use reth_primitives::H256;
 use thiserror::Error;
@@ -32,7 +30,6 @@ impl CursorSubNode {
         };
 
         let res = CursorSubNode { key, node, nibble };
-        dbg!(&res);
         res
     }
 
@@ -74,7 +71,7 @@ impl CursorSubNode {
         }
     }
 
-    fn hash(&self) -> Option<H256> {
+    pub fn hash(&self) -> Option<H256> {
         if self.hash_flag() {
             let node = self.node.as_ref().unwrap();
             match self.nibble {
@@ -90,10 +87,11 @@ impl CursorSubNode {
 pub struct AccountsCursor<'a, C> {
     pub cursor: &'a mut C,
     pub stack: Vec<CursorSubNode>,
+    pub can_skip_state: bool,
 }
 
 #[derive(Error, Debug)]
-enum AccountsCursorError {
+pub enum AccountsCursorError {
     #[error(transparent)]
     DbError(#[from] DbError),
 }
@@ -102,11 +100,11 @@ type Result<T> = std::result::Result<T, AccountsCursorError>;
 
 impl<'a, 'cursor, C> AccountsCursor<'a, C>
 where
-    C: DbCursorRW<'cursor, tables::AccountsTrie2>,
+    C: DbCursorRO<'cursor, tables::AccountsTrie2> + DbCursorRW<'cursor, tables::AccountsTrie2>,
 {
     pub fn new(cursor: &'a mut C) -> Self {
         // Initialize the cursor with a single empty stack element.
-        Self { cursor, stack: vec![CursorSubNode::default()] }
+        Self { cursor, can_skip_state: false, stack: vec![CursorSubNode::default()] }
     }
 
     pub fn print(&self) {
@@ -127,24 +125,111 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    fn next(&mut self) -> Result<Option<Vec<u8>>> {
+    pub fn next(&mut self) -> Result<Option<Vec<u8>>> {
         if let Some(last) = self.stack.last() {
             // tracing::trace!("Can skip state? {}", self.can_skip_state);
             // tracing::trace!("Children in trie? {}", self.children_are_in_trie());
-            // if !self.can_skip_state && self.children_are_in_trie() {
-            //     tracing::trace!("Last nibble: {}", last.nibble);
-            //     match last.nibble {
-            //         // 0xFF -> move to the next sibling since we're done
-            //         -1 => self.move_to_next_sibling(true)?,
-            //         _ => self.consume_node(&self.key().unwrap(), false)?,
-            //     }
-            // } else {
-            //     self.move_to_next_sibling(false)?;
-            // }
-            // self.update_skip_state();
+            if !self.can_skip_state && self.children_are_in_trie() {
+                // tracing::trace!("Last nibble: {}", last.nibble);
+                match last.nibble {
+                    // 0xFF -> move to the next sibling since we're done
+                    -1 => self.move_to_next_sibling(true)?,
+                    _ => self.consume_node()?,
+                }
+            } else {
+                self.move_to_next_sibling(false)?;
+            }
+            self.update_skip_state();
         }
 
         Ok(self.key())
+    }
+
+    /// Reads the current root node from the DB.
+    fn node(&mut self) -> Result<Option<(Vec<u8>, BranchNodeCompact)>> {
+        // Seek to the intermediate node that matches the current key, or the next one if it's not
+        // found for the provided key.
+        let Some((key, value)) = self.cursor.seek(self.key().expect("key must exist"))? else {
+            return Ok(None);
+        };
+        tracing::trace!(
+            "Found intermediate node at at: {:?}, value: {:?}",
+            hex::encode(&key),
+            hex::encode(&value)
+        );
+
+        // TODO: Handle, but it seems like it should always work?
+        let node = Node::unmarshal(&value).expect("node must be unmarshalled");
+        assert_ne!(node.state_mask, 0);
+
+        Ok(Some((key, node)))
+    }
+
+    #[tracing::instrument(skip(self), fields(key = hex::encode(&self.key().unwrap())))]
+    fn consume_node(&mut self) -> Result<()> {
+        let Some((key, node)) = self.node()? else {
+            tracing::trace!("No entry found, clearing stack & returning");
+            self.stack.clear();
+            return Ok(());
+        };
+
+        // TODO: Why is this needed?
+        if !key.is_empty() && !self.stack.is_empty() {
+            tracing::trace!("Overriding stack nibble from {} to {}", self.stack[0].nibble, key[0]);
+            self.stack[0].nibble = key[0] as i8;
+        }
+
+        let subnode = CursorSubNode::new(key, Some(node));
+        let nibble = subnode.nibble;
+        self.stack.push(subnode);
+        self.update_skip_state();
+
+        // TODO: Can we remove this conditional?
+        if !self.can_skip_state || nibble != -1 {
+            tracing::trace!(nibble, "Can't skip state, or nibble is not -1, deleting current");
+            self.cursor.delete_current()?;
+        }
+
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn move_to_next_sibling(
+        &mut self,
+        allow_root_to_child_nibble_within_subnode: bool,
+    ) -> Result<()> {
+        let Some(sn) = self.stack.last_mut() else {
+            tracing::trace!("empty stack, returning");
+            return Ok(());
+        };
+
+        tracing::trace!("nibble: {}", sn.nibble);
+        if sn.nibble >= 15 || (sn.nibble < 0 && !allow_root_to_child_nibble_within_subnode) {
+            tracing::trace!("pop and restart");
+            self.stack.pop();
+            self.move_to_next_sibling(false)?;
+            return Ok(())
+        }
+
+        sn.nibble += 1;
+
+        if sn.node.is_none() {
+            tracing::trace!("node is none, consume node");
+            return self.consume_node()
+        }
+
+        // TODO: What is this for?
+        while sn.nibble < 16 {
+            if sn.state_flag() {
+                return Ok(())
+            }
+            sn.nibble += 1;
+        }
+
+        self.stack.pop();
+        self.move_to_next_sibling(false)?;
+
+        Ok(())
     }
 
     #[tracing::instrument(skip(self))]
@@ -161,17 +246,36 @@ where
     fn children_are_in_trie(&self) -> bool {
         self.stack.last().map_or(false, |n| n.tree_flag())
     }
+
+    #[tracing::instrument(skip(self))]
+    fn update_skip_state(&mut self) {
+        self.can_skip_state = if let Some(key) = self.key() {
+            tracing::trace!("Key: {:?}", hex::encode(&key));
+            // let s = [self.prefix.as_slice(), key.as_slice()].concat();
+            // tracing::trace!("Checking if prefix exists {:?}", hex::encode(&s));
+
+            let contains_prefix = false; // !self.changed.contains(s.as_slice());
+            let hash_flag = self.stack.last().unwrap().hash_flag();
+            let val = !contains_prefix && self.stack.last().unwrap().hash_flag();
+            tracing::trace!(
+                "contains_prefix: {}, hash_flag: {}, val: {}",
+                contains_prefix,
+                hash_flag,
+                val
+            );
+
+            val
+        } else {
+            false
+        };
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Transaction;
-    use proptest::{prelude::ProptestConfig, proptest};
     use reth_db::{mdbx::test_utils::create_test_rw_db, tables, transaction::DbTxMut};
-    use reth_primitives::{keccak256, proofs::KeccakHasher, Account, Address, H256, U256};
-    use reth_rlp::encode_fixed_size;
-    use std::{collections::BTreeMap, ops::DerefMut};
 
     #[test]
     fn test_intermediate_hashes_cursor_traversal_1() {
@@ -182,7 +286,7 @@ mod tests {
             .try_init();
 
         let db = create_test_rw_db();
-        let mut tx = Transaction::new(db.as_ref()).unwrap();
+        let tx = Transaction::new(db.as_ref()).unwrap();
         let mut trie = tx.cursor_write::<tables::AccountsTrie2>().unwrap();
 
         // Create 3 nodes with a common pre-fix 0x1. We store the nodes with their nibbles as key
@@ -206,22 +310,23 @@ mod tests {
         let mut cursor = AccountsCursor::new(&mut trie);
         assert!(cursor.key().unwrap().is_empty());
 
+        // We're traversing the path in lexigraphical order.
         for expected in vec![
             vec![0x1, 0x0],
-            // vec![0x1, 0x0, 0xB, 0x1],
-            // vec![0x1, 0x0, 0xB, 0x3],
-            // vec![0x1, 0x1],
-            // vec![0x1, 0x3],
-            // vec![0x1, 0x3, 0x1],
-            // vec![0x1, 0x3, 0x2],
-            // vec![0x1, 0x3, 0x3],
+            vec![0x1, 0x0, 0xB, 0x1],
+            vec![0x1, 0x0, 0xB, 0x3],
+            vec![0x1, 0x1],
+            vec![0x1, 0x3],
+            vec![0x1, 0x3, 0x1],
+            vec![0x1, 0x3, 0x2],
+            vec![0x1, 0x3, 0x3],
         ] {
             let got = cursor.next().unwrap().unwrap();
             assert_eq!(got, expected);
         }
 
-        // // There should be 8 paths traversed in total from 3 branches.
-        // let got = cursor.next().unwrap();
-        // assert!(got.is_none());
+        // There should be 8 paths traversed in total from 3 branches.
+        let got = cursor.next().unwrap();
+        assert!(got.is_none());
     }
 }

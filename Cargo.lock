@@ -4988,6 +4988,7 @@ dependencies = [
  "revm-primitives",
  "thiserror",
  "tracing",
+ "tracing-subscriber",
  "triehash",
 ]
 
