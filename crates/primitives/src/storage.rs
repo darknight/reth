@@ -38,6 +38,44 @@ impl Compact for StorageEntry {
     }
 }
 
+use reth_codecs::main_codec;
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[main_codec]
+/// The nibbles are the keys for the AccountsTrie and the subkeys for the StorageTrie.
+pub struct Nibbles {
+    inner: bytes::Bytes,
+}
+
+/// Account storage trie node.
+// #[derive_arbitrary(compact)]
+#[derive_arbitrary(compact)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+pub struct StorageTrieEntry2 {
+    /// The nibbles of the intermediate node
+    pub nibbles: Nibbles,
+    /// Encoded node.
+    pub node: Vec<u8>,
+}
+
+// NOTE: Removing main_codec and manually encode subkey
+// and compress second part of the value. If we have compression
+// over whole value (Even SubKey) that would mess up fetching of values with seek_by_key_subkey
+impl Compact for StorageTrieEntry2 {
+    fn to_compact(self, buf: &mut impl bytes::BufMut) -> usize {
+        buf.put_slice(&self.nibbles.inner[..]);
+        buf.put_slice(&self.node[..]);
+        64 + self.node.len()
+    }
+
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8])
+    where
+        Self: Sized,
+    {
+        let node = Vec::from(&buf[64..len]);
+        (Self { nibbles: Nibbles { inner: buf[..64].to_vec().into() }, node }, &buf[len..])
+    }
+}
+
 /// Account storage trie node.
 #[derive_arbitrary(compact)]
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
