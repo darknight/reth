@@ -27,6 +27,7 @@ hasher = "0.1.4"
 tracing = "0.1"
 
 # misc
+tokio = { version = "1.21.2", default-featuers = false, features = ["sync"] }
 thiserror = "1.0.37"
 auto_impl = "1.0"
 itertools = "0.10"

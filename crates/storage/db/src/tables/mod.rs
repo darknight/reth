@@ -30,9 +30,9 @@ use crate::{
     },
 };
 use reth_primitives::{
-    Account, Address, BlockHash, BlockNumber, Bytecode, Header, IntegerList, Nibbles, Receipt,
-    StorageEntry, StorageTrieEntry, StorageTrieEntry2, TransactionSigned, TransitionId, TxHash,
-    TxNumber, H256,
+    Account, Address, BlockHash, BlockNumber, Bytecode, Header, IntegerList, Nibbles,
+    NibblesSubKey, Receipt, StorageEntry, StorageTrieEntry, StorageTrieEntry2, TransactionSigned,
+    TransitionId, TxHash, TxNumber, H256,
 };
 
 /// Enum for the types of tables present in libmdbx.
@@ -307,8 +307,8 @@ dupsort!(
 );
 
 dupsort!(
-    /// From HashedAddress => Nibbles => Intermediate value
-    ( StoragesTrie2 ) H256 | [Nibbles] StorageTrieEntry2
+    /// From HashedAddress => NibblesSubKey => Intermediate value
+    ( StoragesTrie2 ) H256 | [NibblesSubKey] StorageTrieEntry2
 );
 
 table!(

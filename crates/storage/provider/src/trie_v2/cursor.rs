@@ -1,10 +1,12 @@
+use std::marker::PhantomData;
+
 use super::node::{BranchNodeCompact, BranchNodeCompact as Node};
 use reth_db::{
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW},
-    table::Value,
+    table::Key,
     tables, Error as DbError,
 };
-use reth_primitives::{StorageTrieEntry, H256};
+use reth_primitives::{Nibbles, NibblesSubKey, H256};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -85,10 +87,11 @@ impl CursorSubNode {
     }
 }
 
-pub struct TrieWalker<'a, C> {
+pub struct TrieWalker<'a, K, C> {
     pub cursor: &'a mut C,
     pub stack: Vec<CursorSubNode>,
     pub can_skip_state: bool,
+    __phantom: PhantomData<K>,
 }
 
 #[derive(Error, Debug)]
@@ -97,19 +100,19 @@ pub enum AccountsCursorError {
     DbError(#[from] DbError),
 }
 
-pub trait TrieCursor {
-    fn seek(&mut self, key: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>>;
+pub trait TrieCursor<K: Key> {
+    fn seek(&mut self, key: K) -> Result<Option<(Vec<u8>, Vec<u8>)>>;
     fn delete_current(&mut self) -> Result<()>;
-    fn upsert(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()>;
+    fn upsert(&mut self, key: K, value: Vec<u8>) -> Result<()>;
 }
 
 struct AccountTrieCursor<C>(C);
 
-impl<'a, C> TrieCursor for AccountTrieCursor<C>
+impl<'a, C> TrieCursor<Nibbles> for AccountTrieCursor<C>
 where
     C: DbCursorRO<'a, tables::AccountsTrie2> + DbCursorRW<'a, tables::AccountsTrie2>,
 {
-    fn seek(&mut self, key: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    fn seek(&mut self, key: Nibbles) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         Ok(self.0.seek(key.into())?.map(|value| (value.0.inner.to_vec(), value.1)))
     }
 
@@ -117,8 +120,8 @@ where
         Ok(self.0.delete_current()?)
     }
 
-    fn upsert(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
-        Ok(self.0.upsert(key.into(), value)?)
+    fn upsert(&mut self, key: Nibbles, value: Vec<u8>) -> Result<()> {
+        Ok(self.0.upsert(key, value)?)
     }
 }
 
@@ -127,41 +130,37 @@ struct StorageTrieCursor<C> {
     hashed_address: H256,
 }
 
-impl<'a, C> TrieCursor for StorageTrieCursor<C>
+impl<'a, C> TrieCursor<NibblesSubKey> for StorageTrieCursor<C>
 where
     C: DbDupCursorRO<'a, tables::StoragesTrie2>
         + DbDupCursorRW<'a, tables::StoragesTrie2>
         + DbCursorRO<'a, tables::StoragesTrie2>
         + DbCursorRW<'a, tables::StoragesTrie2>,
 {
-    // TODO: Make all of these work with `Nibbles` types.
-    fn seek(&mut self, key: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        dbg!(&self.hashed_address, &hex::encode(&key));
+    fn seek(&mut self, key: NibblesSubKey) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        dbg!(&self.hashed_address, &hex::encode(&key.inner));
         Ok(self
             .cursor
-            .seek_by_key_subkey(self.hashed_address, key.clone().into())?
-            // .filter(|value| value.nibbles.inner == key)
+            .seek_by_key_subkey(self.hashed_address, key.clone())?
             .map(|value| (value.nibbles.inner.to_vec(), value.node)))
     }
 
     fn delete_current(&mut self) -> Result<()> {
-        Ok(self.cursor.delete_current_duplicates()?)
+        Ok(self.cursor.delete_current()?)
     }
 
-    fn upsert(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
-        dbg!(&self.hashed_address, &hex::encode(&key));
-        if let Some(entry) =
-            self.cursor.seek_by_key_subkey(self.hashed_address, key.clone().into())?
-        {
+    fn upsert(&mut self, key: NibblesSubKey, value: Vec<u8>) -> Result<()> {
+        dbg!(&self.hashed_address, &hex::encode(&key.inner));
+        if let Some(entry) = self.cursor.seek_by_key_subkey(self.hashed_address, key.clone())? {
             // "seek exact"
-            if entry.nibbles.inner == key {
+            if entry.nibbles == key {
                 self.cursor.delete_current()?;
             }
         }
 
         self.cursor.upsert(
             self.hashed_address,
-            reth_primitives::StorageTrieEntry2 { nibbles: key.into(), node: value },
+            reth_primitives::StorageTrieEntry2 { nibbles: key, node: value },
         )?;
 
         Ok(())
@@ -170,10 +169,15 @@ where
 
 type Result<T> = std::result::Result<T, AccountsCursorError>;
 
-impl<'a, C: TrieCursor> TrieWalker<'a, C> {
+impl<'a, K: Key + From<Vec<u8>>, C: TrieCursor<K>> TrieWalker<'a, K, C> {
     pub fn new(cursor: &'a mut C) -> Self {
         // Initialize the cursor with a single empty stack element.
-        Self { cursor, can_skip_state: false, stack: vec![CursorSubNode::default()] }
+        Self {
+            cursor,
+            can_skip_state: false,
+            stack: vec![CursorSubNode::default()],
+            __phantom: PhantomData::default(),
+        }
     }
 
     pub fn print(&self) {
@@ -219,7 +223,7 @@ impl<'a, C: TrieCursor> TrieWalker<'a, C> {
         // Seek to the intermediate node that matches the current key, or the next one if it's not
         // found for the provided key.
         tracing::trace!("Seeking to key: {:?}", hex::encode(&self.key().unwrap()));
-        let Some((key, value)) = self.cursor.seek(self.key().expect("key must exist"))? else {
+        let Some((key, value)) = self.cursor.seek(self.key().expect("key must exist").into())? else {
             return Ok(None);
         };
         tracing::trace!(
@@ -346,14 +350,9 @@ mod tests {
     use super::*;
     use crate::Transaction;
     use hex_literal::hex;
-    use reth_db::{
-        mdbx::{test_utils::create_test_rw_db, Env, WriteMap},
-        tables,
-        transaction::DbTxMut,
-    };
+    use reth_db::{mdbx::test_utils::create_test_rw_db, tables, transaction::DbTxMut};
 
     // tests that upsert and seek match on the storagetrie cursor
-    // TODO: Why is this failing?
     #[test]
     fn test_storage_cursor_abstraction() {
         let db = create_test_rw_db();
@@ -365,10 +364,10 @@ mod tests {
         let key = vec![0x2, 0x3];
         let value = vec![0x04, 0x05, 0x06];
 
-        cursor.upsert(key.clone(), value.clone()).unwrap();
+        cursor.upsert(key.clone().into(), value.clone()).unwrap();
         // We are not able to find the key for some reason. Probably related
         // to the key/subkey encoding or how we are using the dupcursor.
-        assert_eq!(cursor.seek(key.clone()).unwrap().unwrap().1, value);
+        assert_eq!(cursor.seek(key.clone().into()).unwrap().unwrap().1, value);
     }
 
     // Create 3 nodes with a common pre-fix 0x1. We store the nodes with their nibbles as key
@@ -478,9 +477,10 @@ mod tests {
         test_cursor(trie, inputs.into_iter(), expected);
     }
 
-    fn test_cursor<T, I>(mut trie: T, inputs: I, expected: Vec<Vec<u8>>)
+    fn test_cursor<K, T, I>(mut trie: T, inputs: I, expected: Vec<Vec<u8>>)
     where
-        T: TrieCursor,
+        K: Key + From<Vec<u8>>,
+        T: TrieCursor<K>,
         I: Iterator<Item = (Vec<u8>, BranchNodeCompact)>,
     {
         let _ = tracing_subscriber::fmt()
@@ -490,20 +490,20 @@ mod tests {
             .try_init();
 
         for (k, v) in inputs {
-            trie.upsert(k.to_vec(), v.marshal()).unwrap();
+            trie.upsert(k.into(), v.marshal()).unwrap();
         }
 
-        let mut cursor = TrieWalker::new(&mut trie);
-        assert!(cursor.key().unwrap().is_empty());
+        let mut walker = TrieWalker::new(&mut trie);
+        assert!(walker.key().unwrap().is_empty());
 
         // We're traversing the path in lexigraphical order.
         for expected in expected {
-            let got = cursor.next().unwrap().unwrap();
-            assert_eq!(got, expected);
+            let got = walker.next().unwrap();
+            assert_eq!(got.unwrap(), expected);
         }
 
-        // // There should be 8 paths traversed in total from 3 branches.
-        // let got = cursor.next().unwrap();
-        // assert!(got.is_none());
+        // There should be 8 paths traversed in total from 3 branches.
+        let got = walker.next().unwrap();
+        assert!(got.is_none());
     }
 }

@@ -1,5 +1,7 @@
 use super::{H256, U256};
-use reth_codecs::{derive_arbitrary, Compact};
+use crate::Bytes;
+use derive_more::Deref;
+use reth_codecs::{derive_arbitrary, main_codec, Compact};
 use serde::{Deserialize, Serialize};
 
 /// Account storage entry.
@@ -38,10 +40,8 @@ impl Compact for StorageEntry {
     }
 }
 
-use crate::Bytes;
-use reth_codecs::main_codec;
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[main_codec]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 /// The nibbles are the keys for the AccountsTrie and the subkeys for the StorageTrie.
 pub struct Nibbles {
     /// The inner nibble bytes
@@ -54,12 +54,43 @@ impl From<Vec<u8>> for Nibbles {
     }
 }
 
+/// TODO:
+#[derive_arbitrary(compact)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, Deref)]
+pub struct NibblesSubKey(Nibbles);
+
+impl From<Vec<u8>> for NibblesSubKey {
+    fn from(inner: Vec<u8>) -> Self {
+        Self(Nibbles { inner: inner.into() })
+    }
+}
+
+impl Compact for NibblesSubKey {
+    fn to_compact(self, buf: &mut impl bytes::BufMut) -> usize {
+        assert!(self.inner.len() <= 32);
+        let mut padded = vec![0; 32];
+        padded[..self.inner.len()].copy_from_slice(&self.inner[..]);
+        buf.put_slice(&padded);
+        buf.put_u8(self.inner.len() as u8);
+        33 // 32 + 1
+    }
+
+    fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8])
+    where
+        Self: Sized,
+    {
+        let len = buf[32] as usize;
+        let inner = Vec::from(&buf[..len]).into();
+        (Self(Nibbles { inner }), &buf[33..])
+    }
+}
+
 /// Account storage trie node.
 #[derive_arbitrary(compact)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct StorageTrieEntry2 {
     /// The nibbles of the intermediate node
-    pub nibbles: Nibbles,
+    pub nibbles: NibblesSubKey,
     /// Encoded node.
     pub node: Vec<u8>,
 }
@@ -69,22 +100,19 @@ pub struct StorageTrieEntry2 {
 // over whole value (Even SubKey) that would mess up fetching of values with seek_by_key_subkey
 impl Compact for StorageTrieEntry2 {
     fn to_compact(self, buf: &mut impl bytes::BufMut) -> usize {
-        dbg!(&self);
-        buf.put_u8(self.nibbles.inner.len() as u8);
-        buf.put_slice(&self.nibbles.inner);
+        let nibbles_len = self.nibbles.to_compact(buf);
         buf.put_slice(&self.node[..]);
-        1 + self.nibbles.inner.len() + self.node.len()
+        dbg!(nibbles_len);
+        nibbles_len + self.node.len()
     }
 
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8])
     where
         Self: Sized,
     {
-        let len_nibbles = buf[0] as usize;
-        let nibbles = Nibbles { inner: Vec::from(&buf[1..len_nibbles + 1]).into() };
-        let node = Vec::from(&buf[len_nibbles + 1..len]);
+        let (nibbles, _) = NibblesSubKey::from_compact(buf, len);
+        let node = Vec::from(&buf[33..len]);
         let this = Self { nibbles, node };
-        dbg!(&this);
         (this, &buf[len..])
     }
 }

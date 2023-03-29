@@ -4987,6 +4987,7 @@ dependencies = [
  "reth-tracing",
  "revm-primitives",
  "thiserror",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "triehash",

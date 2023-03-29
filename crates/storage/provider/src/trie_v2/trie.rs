@@ -5,19 +5,20 @@
 // 2. Update root given a list of updates
 // Be able to calculate incremental state root without taking a write lock
 
-use crate::trie_v2::hash_builder::HashBuilder;
-
 use super::{account::EthAccount, nibbles::Nibbles};
-
+use crate::trie_v2::hash_builder::HashBuilder;
 use reth_db::{
     cursor::{DbCursorRO, DbDupCursorRO},
     tables,
     transaction::{DbTx, DbTxMut},
     Error as DbError,
 };
-use reth_primitives::{keccak256, proofs::EMPTY_ROOT, Address, StorageEntry, H256};
+use reth_primitives::{
+    keccak256, proofs::EMPTY_ROOT, Address, StorageEntry, StorageTrieEntry2, H256,
+};
 use reth_rlp::Encodable;
 use thiserror::Error;
+use tokio::sync::mpsc;
 
 pub struct StateRoot<'a, TX> {
     pub tx: &'a TX,
@@ -47,7 +48,8 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
         let mut cursor = self.tx.cursor_read::<tables::HashedAccount>()?;
         let mut walker = cursor.walk(None)?;
 
-        let mut hash_builder = HashBuilder::new();
+        let (branch_node_tx, mut branch_node_rx) = mpsc::unbounded_channel();
+        let mut hash_builder = HashBuilder::default().with_store_tx(branch_node_tx);
 
         let mut progress = 0;
         while let Some(item) = walker.next() {
@@ -67,8 +69,11 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
             let nibbles = Nibbles::unpack(hashed_address);
             hash_builder.add_leaf(nibbles, &account_rlp);
 
-            progress += 1;
+            while let Ok((key, branch_node)) = branch_node_rx.try_recv() {
+                self.tx.put::<tables::AccountsTrie2>(key.into(), branch_node.marshal())?;
+            }
 
+            progress += 1;
             // there's about 50M accounts hashed, so we want to report every 1%
             // 2 / 100M
             if progress % 500_000 == 0 {
@@ -121,11 +126,19 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StorageRoot<'a, TX> {
         let mut cursor = self.tx.cursor_dup_read::<tables::HashedStorage>()?;
         let mut entry = cursor.seek_by_key_subkey(self.hashed_address, H256::zero())?;
 
-        let mut hash_builder = HashBuilder::new();
+        let (branch_node_tx, mut branch_node_rx) = mpsc::unbounded_channel();
+        let mut hash_builder = HashBuilder::default().with_store_tx(branch_node_tx);
 
         while let Some(StorageEntry { key: hashed_slot, value }) = entry {
             let nibbles = Nibbles::unpack(hashed_slot);
             hash_builder.add_leaf(nibbles, reth_rlp::encode_fixed_size(&value).as_ref());
+
+            while let Ok((key, branch_node)) = branch_node_rx.try_recv() {
+                self.tx.put::<tables::StoragesTrie2>(
+                    self.hashed_address,
+                    StorageTrieEntry2 { nibbles: key.into(), node: branch_node.marshal() },
+                )?;
+            }
 
             // Should be able to use walk_dup, but any call to next() causes an assert fail in
             // mdbx.c

@@ -1,11 +1,9 @@
-#![allow(unused)]
-use std::{default, fmt::Debug};
-
-use reth_primitives::{keccak256, proofs::EMPTY_ROOT, H256};
-
 use crate::trie_v2::node::{
     rlp_hash, BranchNode, BranchNodeCompact, ExtensionNode, LeafNode, KECCAK_LENGTH,
 };
+use reth_primitives::{keccak256, proofs::EMPTY_ROOT, H256};
+use std::fmt::Debug;
+use tokio::sync::mpsc;
 
 use super::nibbles::Nibbles;
 
@@ -48,8 +46,6 @@ impl Default for HashBuilderValue {
     }
 }
 
-use std::cmp;
-
 pub(crate) fn has_prefix(s: &[u8], prefix: &[u8]) -> bool {
     s.starts_with(prefix)
 }
@@ -58,7 +54,9 @@ pub(crate) fn assert_subset(sub: u16, sup: u16) {
     assert_eq!(sub & sup, sub);
 }
 
-#[derive(Clone, Debug, Default)]
+type BranchNodeSender = mpsc::UnboundedSender<(Vec<u8>, BranchNodeCompact)>;
+
+#[derive(Debug, Default)]
 pub struct HashBuilder {
     key: Nibbles,
     stack: Vec<Vec<u8>>,
@@ -69,19 +67,26 @@ pub struct HashBuilder {
     hash_masks: Vec<u16>,
 
     is_in_db_trie: bool,
+
+    store_tx: Option<BranchNodeSender>,
 }
 
 impl HashBuilder {
+    pub fn new(store_tx: Option<BranchNodeSender>) -> Self {
+        Self { store_tx, ..Default::default() }
+    }
+
+    pub fn with_store_tx(mut self, tx: BranchNodeSender) -> Self {
+        self.store_tx = Some(tx);
+        self
+    }
+
     pub fn stack_hex(&self) {
         println!("============ STACK ===============");
         for item in &self.stack {
             println!("{}", hex::encode(item));
         }
         println!("============ END STACK ===============");
-    }
-
-    pub fn new() -> Self {
-        Self::default()
     }
 
     #[tracing::instrument(skip_all)]
@@ -340,6 +345,11 @@ impl HashBuilder {
             // Send it over to the provided channel which will handle it on the
             // other side of the HashBuilder
             tracing::debug!(node = ?n, "intermediate node");
+            if let Some(tx) = &self.store_tx {
+                if !current.hex_data[..len].is_empty() {
+                    let _ = tx.send((current.hex_data[..len].to_vec(), n));
+                }
+            }
         }
     }
 
@@ -402,7 +412,7 @@ mod tests {
             // Collect into a btree map to sort the data
             .collect::<BTreeMap<_, _>>();
 
-        let mut hb = HashBuilder::new();
+        let mut hb = HashBuilder::default();
 
         hashed.iter().for_each(|(key, val)| {
             let nibbles = Nibbles::unpack(key);
@@ -419,7 +429,7 @@ mod tests {
         K: AsRef<[u8]> + Ord,
         V: AsRef<[u8]>,
     {
-        let mut hb = HashBuilder::new();
+        let mut hb = HashBuilder::default();
 
         let data = iter.collect::<BTreeMap<_, _>>();
         data.iter().for_each(|(key, val)| {
@@ -431,7 +441,7 @@ mod tests {
 
     #[test]
     fn empty() {
-        assert_eq!(HashBuilder::new().root(), EMPTY_ROOT);
+        assert_eq!(HashBuilder::default().root(), EMPTY_ROOT);
     }
 
     // TODO: Expand these to include more complex cases.
@@ -462,7 +472,7 @@ mod tests {
             H256::from_str("9fa752911d55c3a1246133fe280785afbdba41f357e9cae1131d5f5b0a078b9c")
                 .unwrap();
 
-        let mut hb = HashBuilder::new();
+        let mut hb = HashBuilder::default();
         hb.add_branch(Nibbles::default(), root_hash);
         assert_eq!(hb.root(), root_hash);
     }
@@ -477,7 +487,7 @@ mod tests {
             raw_input.iter().map(|(key, value)| (Nibbles::unpack(key), value)).collect::<Vec<_>>();
 
         // We create the hash builder and add the leaves
-        let mut hb = HashBuilder::new();
+        let mut hb = HashBuilder::default();
         for (key, val) in input.iter() {
             hb.add_leaf(key.clone(), val.as_slice());
         }
@@ -498,7 +508,7 @@ mod tests {
         reth_rlp::encode_list::<dyn Encodable, _>(&branch, &mut branch_node_rlp);
         let branch_node_hash = keccak256(branch_node_rlp);
 
-        let mut hb2 = HashBuilder::new();
+        let mut hb2 = HashBuilder::default();
         // Insert the branch with the `0x6` shared prefix.
         hb2.add_branch(Nibbles::from_hex(vec![0x6]), branch_node_hash);
 
