@@ -70,7 +70,7 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
             hash_builder.add_leaf(nibbles, &account_rlp);
 
             while let Ok((key, branch_node)) = branch_node_rx.try_recv() {
-                self.tx.put::<tables::AccountsTrie2>(key.into(), branch_node.marshal())?;
+                self.tx.put::<tables::AccountsTrie2>(key.hex_data.into(), branch_node.marshal())?;
             }
 
             progress += 1;
@@ -136,7 +136,7 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StorageRoot<'a, TX> {
             while let Ok((key, branch_node)) = branch_node_rx.try_recv() {
                 self.tx.put::<tables::StoragesTrie2>(
                     self.hashed_address,
-                    StorageTrieEntry2 { nibbles: key.into(), node: branch_node.marshal() },
+                    StorageTrieEntry2 { nibbles: key.hex_data.into(), node: branch_node.marshal() },
                 )?;
             }
 

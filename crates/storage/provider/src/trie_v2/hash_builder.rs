@@ -54,7 +54,7 @@ pub(crate) fn assert_subset(sub: u16, sup: u16) {
     assert_eq!(sub & sup, sub);
 }
 
-type BranchNodeSender = mpsc::UnboundedSender<(Vec<u8>, BranchNodeCompact)>;
+type BranchNodeSender = mpsc::UnboundedSender<(Nibbles, BranchNodeCompact)>;
 
 #[derive(Debug, Default)]
 pub struct HashBuilder {
@@ -345,9 +345,10 @@ impl HashBuilder {
             // Send it over to the provided channel which will handle it on the
             // other side of the HashBuilder
             tracing::debug!(node = ?n, "intermediate node");
+            let common_prefix = current.slice(0, len);
             if let Some(tx) = &self.store_tx {
-                if !current.hex_data[..len].is_empty() {
-                    let _ = tx.send((current.hex_data[..len].to_vec(), n));
+                if !common_prefix.is_empty() {
+                    let _ = tx.send((common_prefix, n));
                 }
             }
         }
