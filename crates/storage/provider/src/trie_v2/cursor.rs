@@ -149,6 +149,7 @@ where
     fn node(&mut self) -> Result<Option<(Vec<u8>, BranchNodeCompact)>> {
         // Seek to the intermediate node that matches the current key, or the next one if it's not
         // found for the provided key.
+        tracing::trace!("Seeking to key: {:?}", hex::encode(&self.key().unwrap()));
         let Some((key, value)) = self.cursor.seek(self.key().expect("key must exist"))? else {
             return Ok(None);
         };
@@ -275,10 +276,89 @@ where
 mod tests {
     use super::*;
     use crate::Transaction;
+    use hex_literal::hex;
     use reth_db::{mdbx::test_utils::create_test_rw_db, tables, transaction::DbTxMut};
 
     #[test]
-    fn test_intermediate_hashes_cursor_traversal_1() {
+    fn test_cursor_1() {
+        // Create 3 nodes with a common pre-fix 0x1. We store the nodes with their nibbles as key
+        let inputs = vec![
+            // State Mask: 0b0000_0000_0000_1011: 0, 1, 3 idxs to be hashed
+            // Tree Mask: 0b0000_0000_0000_1001: 0, 3 to be used from the tree (?)
+            (vec![0x1u8], BranchNodeCompact::new(0b1011, 0b1001, 0, vec![], None)),
+            // State Mask: 0b0000_0000_0000_1010: 1, 3 idxs to be hashed
+            // No data to pull from tree
+            (vec![0x1u8, 0x0, 0xB], BranchNodeCompact::new(0b1010, 0, 0, vec![], None)),
+            // State Mask: 0b0000_0000_0000_1110: 1, 2, 3 idxs to be hashed
+            // No data to pull from tree
+            (vec![0x1u8, 0x3], BranchNodeCompact::new(0b1110, 0, 0, vec![], None)),
+        ];
+
+        let expected = vec![
+            vec![0x1, 0x0],
+            // The [0x1, 0x0] prefix is shared by the first 2 nodes, however:
+            // 1. 0x0 for the first node points to the child node path
+            // 2. 0x0 for the second node is a key.
+            // So to proceed to add 1 and 3, we need to push the sibling first (0xB).
+            vec![0x1, 0x0, 0xB, 0x1],
+            vec![0x1, 0x0, 0xB, 0x3],
+            vec![0x1, 0x1],
+            vec![0x1, 0x3],
+            vec![0x1, 0x3, 0x1],
+            vec![0x1, 0x3, 0x2],
+            vec![0x1, 0x3, 0x3],
+        ];
+
+        test_cursor(inputs.into_iter(), expected);
+    }
+
+    #[test]
+    fn test_cursor_2() {
+        let inputs = vec![
+            (
+                vec![0x4u8],
+                Node::new(
+                    // State Mask: 0b0000_0000_0001_0100: 2, 4
+                    // The state mask specifies where to go after the branch node.
+                    0b0001_0100,
+                    // Tree mask empty
+                    0,
+                    // Hash mask: 0b0000_0000_0000_0100: 2
+                    // The hash mask needs to be specified here since the branch node
+                    // has a child hash.
+                    0b0000_0100,
+                    vec![H256::from(hex!(
+                        "0384e6e2c2b33c4eb911a08a7ff57f83dc3eb86d8d0c92ec112f3b416d6685a9"
+                    ))],
+                    None,
+                ),
+            ),
+            (
+                vec![0x6u8],
+                Node::new(
+                    // State Mask: 0b0000_0000_0001_0010: 1, 4
+                    0b0001_0010,
+                    // Tree mask empty
+                    0,
+                    // Hash mask: 0b0000_0000_0000_0010: 1
+                    0b00010,
+                    vec![H256::from(hex!(
+                        "7f9a58b00625a6e725559acf327baf88d90e4a5b65a2003acd24f110c0441df1"
+                    ))],
+                    None,
+                ),
+            ),
+        ];
+
+        let expected = vec![vec![0x4, 0x2], vec![0x4, 0x4], vec![0x6, 0x1], vec![0x6, 0x4]];
+
+        test_cursor(inputs.into_iter(), expected);
+    }
+
+    fn test_cursor<I: Iterator<Item = (Vec<u8>, BranchNodeCompact)>>(
+        inputs: I,
+        expected: Vec<Vec<u8>>,
+    ) {
         let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::TRACE)
             // .with_env_filter(EnvFilter::from_default_env())
@@ -289,20 +369,7 @@ mod tests {
         let tx = Transaction::new(db.as_ref()).unwrap();
         let mut trie = tx.cursor_write::<tables::AccountsTrie2>().unwrap();
 
-        // Create 3 nodes with a common pre-fix 0x1. We store the nodes with their nibbles as key
-        let inputs = vec![
-            // State Mask: 0b0000_0000_0000_1011: 0, 1, 3 idxs to be hashed
-            // Tree Mask: 0b0000_0000_0000_1001: 0, 3 idxs to be pulled from the tree?
-            (vec![0x1u8], BranchNodeCompact::new(0b1011, 0b1001, 0, vec![], None)),
-            // State Mask: 0b0000_0000_0000_1010: 1, 3 idxs to be hashed
-            // No data to pull from tree
-            (vec![0x1u8, 0x0, 0xB], BranchNodeCompact::new(0b1010, 0, 0, vec![], None)),
-            // State Mask: 0b0000_0000_0000_1110: 1, 2, 3 idxs to be hashed
-            // No data to pull from tree
-            (vec![0x1u8, 0x3], BranchNodeCompact::new(0b1110, 0, 0, vec![], None)),
-        ];
-
-        for (k, v) in &inputs {
+        for (k, v) in inputs {
             trie.upsert(k.to_vec(), v.marshal()).unwrap();
         }
 
@@ -311,16 +378,7 @@ mod tests {
         assert!(cursor.key().unwrap().is_empty());
 
         // We're traversing the path in lexigraphical order.
-        for expected in vec![
-            vec![0x1, 0x0],
-            vec![0x1, 0x0, 0xB, 0x1],
-            vec![0x1, 0x0, 0xB, 0x3],
-            vec![0x1, 0x1],
-            vec![0x1, 0x3],
-            vec![0x1, 0x3, 0x1],
-            vec![0x1, 0x3, 0x2],
-            vec![0x1, 0x3, 0x3],
-        ] {
+        for expected in expected {
             let got = cursor.next().unwrap().unwrap();
             assert_eq!(got, expected);
         }
