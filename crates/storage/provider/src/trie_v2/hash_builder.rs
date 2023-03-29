@@ -382,6 +382,7 @@ mod tests {
     use super::*;
     use crate::trie_v2::nibbles::Nibbles;
     use hex_literal::hex;
+    use proptest::prelude::*;
     use reth_primitives::{proofs::KeccakHasher, H256, U256};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -444,7 +445,22 @@ mod tests {
         assert_eq!(HashBuilder::default().root(), EMPTY_ROOT);
     }
 
-    // TODO: Expand these to include more complex cases.
+    #[test]
+    fn arbitrary_hashed_root() {
+        proptest!(|(state: BTreeMap<H256, U256>)| {
+            assert_hashed_trie_root(state.iter());
+        });
+    }
+
+    #[test]
+    fn arbitrary_root() {
+        proptest!(|(state: BTreeMap<Vec<u8>, Vec<u8>>)| {
+            // filter non-nibbled keys
+            let state = state.into_iter().filter(|(k, _)| k.len() > 1).collect::<BTreeMap<_, _>>();
+            assert_trie_root(state.into_iter());
+        });
+    }
+
     #[test]
     fn test_root_raw_data() {
         reth_tracing::init_test_tracing();
