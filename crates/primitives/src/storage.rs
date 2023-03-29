@@ -38,16 +38,17 @@ impl Compact for StorageEntry {
     }
 }
 
+use crate::Bytes;
 use reth_codecs::main_codec;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[main_codec]
 /// The nibbles are the keys for the AccountsTrie and the subkeys for the StorageTrie.
 pub struct Nibbles {
-    inner: bytes::Bytes,
+    /// The inner nibble bytes
+    pub inner: Bytes,
 }
 
 /// Account storage trie node.
-// #[derive_arbitrary(compact)]
 #[derive_arbitrary(compact)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct StorageTrieEntry2 {

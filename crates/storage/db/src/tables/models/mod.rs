@@ -14,7 +14,7 @@ use crate::{
     table::{Decode, Encode},
     Error,
 };
-use reth_primitives::{Address, H256};
+use reth_primitives::{Address, Nibbles, H256};
 
 /// Macro that implements [`Encode`] and [`Decode`] for uint types.
 macro_rules! impl_uints {
@@ -44,6 +44,19 @@ macro_rules! impl_uints {
 }
 
 impl_uints!(u64, u32, u16, u8);
+
+impl Encode for Nibbles {
+    type Encoded = Vec<u8>;
+    fn encode(self) -> Self::Encoded {
+        self.inner.to_vec()
+    }
+}
+
+impl Decode for Nibbles {
+    fn decode<B: AsRef<[u8]>>(value: B) -> Result<Self, Error> {
+        Ok(Nibbles { inner: value.as_ref().into() })
+    }
+}
 
 impl Encode for Vec<u8> {
     type Encoded = Vec<u8>;
