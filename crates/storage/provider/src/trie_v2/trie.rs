@@ -48,8 +48,8 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
         let mut cursor = self.tx.cursor_read::<tables::HashedAccount>()?;
         let mut walker = cursor.walk(None)?;
 
-        let (branch_node_tx, mut branch_node_rx) = mpsc::unbounded_channel();
-        let mut hash_builder = HashBuilder::default().with_store_tx(branch_node_tx);
+        // let (branch_node_tx, mut branch_node_rx) = mpsc::unbounded_channel();
+        let mut hash_builder = HashBuilder::default(); // .with_store_tx(branch_node_tx);
 
         let mut progress = 0;
         while let Some(item) = walker.next() {
@@ -73,9 +73,9 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
             let nibbles = Nibbles::unpack(hashed_address);
             hash_builder.add_leaf(nibbles, &account_rlp);
 
-            while let Ok((key, branch_node)) = branch_node_rx.try_recv() {
-                self.tx.put::<tables::AccountsTrie2>(key.hex_data.into(), branch_node.marshal())?;
-            }
+            // while let Ok((key, branch_node)) = branch_node_rx.try_recv() {
+            //     self.tx.put::<tables::AccountsTrie2>(key.hex_data.into(),
+            // branch_node.marshal())?; }
 
             progress += 1;
             // there's about 50M accounts hashed, so we want to report every 1%
@@ -130,18 +130,18 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StorageRoot<'a, TX> {
         let mut cursor = self.tx.cursor_dup_read::<tables::HashedStorage>()?;
         let mut entry = cursor.seek_by_key_subkey(self.hashed_address, H256::zero())?;
 
-        let (branch_node_tx, mut branch_node_rx) = mpsc::unbounded_channel();
-        let mut hash_builder = HashBuilder::default().with_store_tx(branch_node_tx);
+        // let (branch_node_tx, mut branch_node_rx) = mpsc::unbounded_channel();
+        let mut hash_builder = HashBuilder::default(); // .with_store_tx(branch_node_tx);
         while let Some(StorageEntry { key: hashed_slot, value }) = entry {
             let nibbles = Nibbles::unpack(hashed_slot);
             hash_builder.add_leaf(nibbles, reth_rlp::encode_fixed_size(&value).as_ref());
 
-            while let Ok((key, branch_node)) = branch_node_rx.try_recv() {
-                self.tx.put::<tables::StoragesTrie2>(
-                    self.hashed_address,
-                    StorageTrieEntry2 { nibbles: key.hex_data.into(), node: branch_node.marshal() },
-                )?;
-            }
+            // while let Ok((key, branch_node)) = branch_node_rx.try_recv() {
+            //     self.tx.put::<tables::StoragesTrie2>(
+            //         self.hashed_address,
+            //         StorageTrieEntry2 { nibbles: key.hex_data.into(), node: branch_node.marshal()
+            // },     )?;
+            // }
 
             // Should be able to use walk_dup, but any call to next() causes an assert fail in
             // mdbx.c
