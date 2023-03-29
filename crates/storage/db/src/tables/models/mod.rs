@@ -8,6 +8,7 @@ pub mod storage_sharded_key;
 
 pub use accounts::*;
 pub use blocks::*;
+use reth_codecs::Compact;
 pub use sharded_key::ShardedKey;
 
 use crate::{
@@ -47,14 +48,19 @@ impl_uints!(u64, u32, u16, u8);
 
 impl Encode for Nibbles {
     type Encoded = Vec<u8>;
+
+    // Delegate to the Compact implementation
     fn encode(self) -> Self::Encoded {
-        self.inner.to_vec()
+        let mut buf = Vec::new();
+        self.to_compact(&mut buf);
+        buf
     }
 }
 
 impl Decode for Nibbles {
     fn decode<B: AsRef<[u8]>>(value: B) -> Result<Self, Error> {
-        Ok(Nibbles { inner: value.as_ref().into() })
+        let buf = value.as_ref();
+        Ok(Nibbles::from_compact(&buf, buf.len()).0)
     }
 }
 

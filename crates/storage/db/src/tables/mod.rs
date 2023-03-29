@@ -293,7 +293,7 @@ dupsort!(
 
 table!(
     /// Stores the current state's Merkle Patricia Tree.
-    ( AccountsTrie2 ) Vec<u8> | Vec<u8>
+    ( AccountsTrie2 ) Nibbles | Vec<u8>
 );
 
 table!(
