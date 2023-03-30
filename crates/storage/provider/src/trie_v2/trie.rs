@@ -354,9 +354,6 @@ mod tests {
         S: IntoIterator<Item = (H256, U256)>,
     {
         let encoded_accounts = accounts.into_iter().filter_map(|(address, (account, storage))| {
-            if account.is_empty() {
-                return None
-            }
             let storage_root =
                 if account.has_bytecode() { storage_root(storage.into_iter()) } else { EMPTY_ROOT };
             let mut out = Vec::new();
@@ -404,8 +401,7 @@ mod tests {
         });
     }
 
-    // TODO:
-    // #[tokio::test]
+    #[tokio::test]
     // This ensures we dont add empty accounts to the trie
     async fn test_empty_account() {
         let state: State = BTreeMap::from([
