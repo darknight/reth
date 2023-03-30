@@ -848,4 +848,53 @@ mod tests {
         //     );
         // }
     }
+
+    #[tokio::test]
+    async fn account_trie_around_extension_node() {
+        let db = create_test_rw_db();
+        let mut tx = Transaction::new(db.as_ref()).unwrap();
+
+        let a = Account {
+            nonce: 0,
+            balance: U256::from(1u64),
+            bytecode_hash: Some(H256::random()),
+            ..Default::default()
+        };
+        let val = encode_account(a, None);
+        use hex_literal::hex;
+
+        let mut hashed_accounts = tx.cursor_write::<tables::HashedAccount>().unwrap();
+        let mut hb = HashBuilder::new(None);
+
+        for key in [
+            hex!("30af561000000000000000000000000000000000000000000000000000000000"),
+            hex!("30af569000000000000000000000000000000000000000000000000000000000"),
+            hex!("30af650000000000000000000000000000000000000000000000000000000000"),
+            hex!("30af6f0000000000000000000000000000000000000000000000000000000000"),
+            hex!("30af8f0000000000000000000000000000000000000000000000000000000000"),
+            hex!("3100000000000000000000000000000000000000000000000000000000000000"),
+        ] {
+            hashed_accounts.upsert(H256(key), a).unwrap();
+            hb.add_leaf(Nibbles::unpack(&key), &val);
+        }
+
+        let expected = hb.root();
+        let loader = StateRoot::new(tx.deref_mut());
+        let got = loader.root().await.unwrap();
+        assert_eq!(expected, got);
+
+        // let node_map = read_all_nodes(txn.cursor(tables::TrieAccount).unwrap());
+        // assert_eq!(node_map.len(), 2);
+
+        // assert_eq!(node_map[&vec![0x3]], Node::new(0b11, 0b01, 0b00, vec![], None));
+
+        // let node2 = &node_map[&vec![0x3, 0x0, 0xA, 0xF]];
+
+        // assert_eq!(node2.state_mask, 0b101100000);
+        // assert_eq!(node2.tree_mask, 0b000000000);
+        // assert_eq!(node2.hash_mask, 0b001000000);
+
+        // assert_eq!(node2.root_hash, None);
+        // assert_eq!(node2.hashes.len(), 1);
+    }
 }
