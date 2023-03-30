@@ -466,21 +466,15 @@ mod tests {
         test_cursor(trie, inputs.into_iter(), expected);
     }
 
-    #[test]
-    fn test_cursor_2() {
-        let inputs = vec![
+    fn inputs2() -> Vec<(Vec<u8>, BranchNodeCompact)> {
+        vec![
             (
                 vec![0x4u8],
                 Node::new(
-                    // State Mask: 0b0000_0000_0001_0100: 2, 4
-                    // The state mask specifies where to go after the branch node.
-                    0b0001_0100,
-                    // Tree mask empty
+                    // 2 and 4
+                    0b10100,
                     0,
-                    // Hash mask: 0b0000_0000_0000_0100: 2
-                    // The hash mask needs to be specified here since the branch node
-                    // has a child hash.
-                    0b0000_0100,
+                    0b00100,
                     vec![H256::from(hex!(
                         "0384e6e2c2b33c4eb911a08a7ff57f83dc3eb86d8d0c92ec112f3b416d6685a9"
                     ))],
@@ -490,11 +484,9 @@ mod tests {
             (
                 vec![0x6u8],
                 Node::new(
-                    // State Mask: 0b0000_0000_0001_0010: 1, 4
-                    0b0001_0010,
-                    // Tree mask empty
+                    // 1 and 4
+                    0b10010,
                     0,
-                    // Hash mask: 0b0000_0000_0000_0010: 1
                     0b00010,
                     vec![H256::from(hex!(
                         "7f9a58b00625a6e725559acf327baf88d90e4a5b65a2003acd24f110c0441df1"
@@ -502,13 +494,34 @@ mod tests {
                     None,
                 ),
             ),
-        ];
+        ]
+    }
 
-        let expected = vec![vec![0x4, 0x2], vec![0x4, 0x4], vec![0x6, 0x1], vec![0x6, 0x4]];
+    fn expected2() -> Vec<Vec<u8>> {
+        vec![vec![0x4, 0x2], vec![0x4, 0x4], vec![0x6, 0x1], vec![0x6, 0x4]]
+    }
 
+    #[test]
+    fn test_accounts_cursor_2() {
+        let inputs = inputs2();
+        let expected = expected2();
         let db = create_test_rw_db();
         let tx = Transaction::new(db.as_ref()).unwrap();
         let trie = AccountTrieCursor(tx.cursor_write::<tables::AccountsTrie2>().unwrap());
+        test_cursor(trie, inputs.clone().into_iter(), expected);
+    }
+
+    #[test]
+    fn test_storage_cursor_2() {
+        let inputs = inputs2();
+        let expected = expected2();
+
+        let db = create_test_rw_db();
+        let tx = Transaction::new(db.as_ref()).unwrap();
+        let trie = StorageTrieCursor::new(
+            tx.cursor_dup_write::<tables::StoragesTrie2>().unwrap(),
+            H256::random(),
+        );
         test_cursor(trie, inputs.into_iter(), expected);
     }
 
