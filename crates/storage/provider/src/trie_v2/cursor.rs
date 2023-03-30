@@ -104,6 +104,8 @@ pub enum AccountsCursorError {
 }
 
 pub trait TrieCursor<K: Key> {
+    fn seek_exact(&mut self, key: K) -> Result<Option<(Vec<u8>, Vec<u8>)>>;
+
     fn seek(&mut self, key: K) -> Result<Option<(Vec<u8>, Vec<u8>)>>;
     fn delete_current(&mut self) -> Result<()>;
     fn upsert(&mut self, key: K, value: Vec<u8>) -> Result<()>;
@@ -115,6 +117,10 @@ impl<'a, C> TrieCursor<Nibbles> for AccountTrieCursor<C>
 where
     C: DbCursorRO<'a, tables::AccountsTrie2> + DbCursorRW<'a, tables::AccountsTrie2>,
 {
+    fn seek_exact(&mut self, key: Nibbles) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        Ok(self.0.seek_exact(key.into())?.map(|value| (value.0.inner.to_vec(), value.1)))
+    }
+
     fn seek(&mut self, key: Nibbles) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         Ok(self.0.seek(key.into())?.map(|value| (value.0.inner.to_vec(), value.1)))
     }
@@ -146,8 +152,15 @@ where
         + DbCursorRO<'a, tables::StoragesTrie2>
         + DbCursorRW<'a, tables::StoragesTrie2>,
 {
+    fn seek_exact(&mut self, key: NibblesSubKey) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        Ok(self
+            .cursor
+            .seek_by_key_subkey(self.hashed_address, key.clone())?
+            .filter(|e| e.nibbles == key)
+            .map(|value| (value.nibbles.inner.to_vec(), value.node)))
+    }
+
     fn seek(&mut self, key: NibblesSubKey) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        dbg!(&self.hashed_address, &hex::encode(&key.inner));
         Ok(self
             .cursor
             .seek_by_key_subkey(self.hashed_address, key.clone())?
@@ -159,7 +172,6 @@ where
     }
 
     fn upsert(&mut self, key: NibblesSubKey, value: Vec<u8>) -> Result<()> {
-        dbg!(&self.hashed_address, &hex::encode(&key.inner));
         if let Some(entry) = self.cursor.seek_by_key_subkey(self.hashed_address, key.clone())? {
             // "seek exact"
             if entry.nibbles == key {
@@ -189,7 +201,14 @@ impl<'a, K: Key + From<Vec<u8>>, C: TrieCursor<K>> TrieWalker<'a, K, C> {
             __phantom: PhantomData::default(),
         };
 
+        // When instantiating the walker, we first need to check if there's
+        // a node at the root of the trie. If there is, we need to push it.
+        let root = this.node(true).unwrap();
+        if let Some((key, value)) = root {
+            this.stack[0] = CursorSubNode::new(key, Some(value));
+        }
         this.update_skip_state();
+
         this
     }
 
@@ -231,12 +250,18 @@ impl<'a, K: Key + From<Vec<u8>>, C: TrieCursor<K>> TrieWalker<'a, K, C> {
         Ok(self.key())
     }
 
-    /// Reads the current root node from the DB.
-    fn node(&mut self) -> Result<Option<(Vec<u8>, BranchNodeCompact)>> {
+    /// Reads the current root node from the DB. If `exact` is passed as true, then we're looking
+    /// for the root node during walker instantiation.
+    fn node(&mut self, exact: bool) -> Result<Option<(Vec<u8>, BranchNodeCompact)>> {
         // Seek to the intermediate node that matches the current key, or the next one if it's not
         // found for the provided key.
         tracing::trace!("Seeking to key: {:?}", hex::encode(&self.key().unwrap()));
-        let Some((key, value)) = self.cursor.seek(self.key().expect("key must exist").into())? else {
+        let entry = if exact {
+            self.cursor.seek_exact(self.key().expect("key must exist").into())?
+        } else {
+            self.cursor.seek(self.key().expect("key must exist").into())?
+        };
+        let Some((key, value)) = entry else {
             return Ok(None);
         };
         tracing::trace!(
@@ -254,7 +279,7 @@ impl<'a, K: Key + From<Vec<u8>>, C: TrieCursor<K>> TrieWalker<'a, K, C> {
 
     #[tracing::instrument(skip(self), fields(key = hex::encode(&self.key().unwrap())))]
     fn consume_node(&mut self) -> Result<()> {
-        let Some((key, node)) = self.node()? else {
+        let Some((key, node)) = self.node(false)? else {
             tracing::trace!("No entry found, clearing stack & returning");
             self.stack.clear();
             return Ok(());
@@ -372,7 +397,7 @@ mod tests {
         let tx = Transaction::new(db.as_ref()).unwrap();
         let cursor = tx.cursor_dup_write::<tables::StoragesTrie2>().unwrap();
 
-        let mut cursor = StorageTrieCursor { cursor, hashed_address: H256::random() };
+        let mut cursor = StorageTrieCursor::new(cursor, H256::random());
 
         let key = vec![0x2, 0x3];
         let value = vec![0x04, 0x05, 0x06];
@@ -507,7 +532,6 @@ mod tests {
         }
 
         let mut walker = TrieWalker::new(&mut trie, Default::default());
-        dbg!(walker.key().unwrap());
         assert!(walker.key().unwrap().is_empty());
 
         // We're traversing the path in lexigraphical order.
