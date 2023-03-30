@@ -29,6 +29,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 pub type BranchNodeUpdateSender = UnboundedSender<BranchNodeUpdate>;
 
+#[derive(Debug, Clone)]
 pub enum BranchNodeUpdate {
     Account(Nibbles, BranchNodeCompact),
     Storage(H256, Nibbles, BranchNodeCompact),
@@ -879,22 +880,39 @@ mod tests {
         }
 
         let expected = hb.root();
-        let loader = StateRoot::new(tx.deref_mut());
+        let (sender, recv) = mpsc::unbounded_channel();
+        let loader = StateRoot::new(tx.deref_mut()).with_branch_node_update_sender(sender);
         let got = loader.root().await.unwrap();
         assert_eq!(expected, got);
 
-        // let node_map = read_all_nodes(txn.cursor(tables::TrieAccount).unwrap());
-        // assert_eq!(node_map.len(), 2);
+        // Check account trie
+        drop(loader);
+        let branch_node_stream = UnboundedReceiverStream::new(recv);
+        let updates = branch_node_stream.collect::<Vec<_>>().await;
 
-        // assert_eq!(node_map[&vec![0x3]], Node::new(0b11, 0b01, 0b00, vec![], None));
+        let account_updates = updates
+            .iter()
+            .filter_map(|u| {
+                if let BranchNodeUpdate::Account(nibbles, node) = u {
+                    Some((nibbles, node))
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeMap<_, _>>();
 
-        // let node2 = &node_map[&vec![0x3, 0x0, 0xA, 0xF]];
+        assert_eq!(account_updates.len(), 2);
 
-        // assert_eq!(node2.state_mask, 0b101100000);
-        // assert_eq!(node2.tree_mask, 0b000000000);
-        // assert_eq!(node2.hash_mask, 0b001000000);
+        let node = account_updates.get(&Nibbles::from(vec![0x3])).unwrap();
+        let expected = BranchNodeCompact::new(0b0011, 0b0001, 0b0000, vec![], None);
+        assert_eq!(node, &&expected);
 
-        // assert_eq!(node2.root_hash, None);
-        // assert_eq!(node2.hashes.len(), 1);
+        let node = account_updates.get(&Nibbles::from(vec![0x3, 0x0, 0xA, 0xF])).unwrap();
+        assert_eq!(node.state_mask, 0b101100000);
+        assert_eq!(node.tree_mask, 0b000000000);
+        assert_eq!(node.hash_mask, 0b001000000);
+
+        assert_eq!(node.root_hash, None);
+        assert_eq!(node.hashes.len(), 1);
     }
 }
