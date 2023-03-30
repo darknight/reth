@@ -1,12 +1,14 @@
-use std::marker::PhantomData;
-
-use super::node::{BranchNodeCompact, BranchNodeCompact as Node};
+use super::{
+    node::{BranchNodeCompact, BranchNodeCompact as Node},
+    prefix_set::PrefixSet,
+};
 use reth_db::{
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW},
     table::Key,
     tables, Error as DbError,
 };
 use reth_primitives::{Nibbles, NibblesSubKey, H256};
+use std::marker::PhantomData;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -91,6 +93,7 @@ pub struct TrieWalker<'a, K, C> {
     pub cursor: &'a mut C,
     pub stack: Vec<CursorSubNode>,
     pub can_skip_state: bool,
+    pub changes: PrefixSet,
     __phantom: PhantomData<K>,
 }
 
@@ -125,9 +128,15 @@ where
     }
 }
 
-struct StorageTrieCursor<C> {
+pub struct StorageTrieCursor<C> {
     cursor: C,
     hashed_address: H256,
+}
+
+impl<C> StorageTrieCursor<C> {
+    pub fn new(cursor: C, hashed_address: H256) -> Self {
+        Self { cursor, hashed_address }
+    }
 }
 
 impl<'a, C> TrieCursor<NibblesSubKey> for StorageTrieCursor<C>
@@ -170,14 +179,18 @@ where
 type Result<T> = std::result::Result<T, AccountsCursorError>;
 
 impl<'a, K: Key + From<Vec<u8>>, C: TrieCursor<K>> TrieWalker<'a, K, C> {
-    pub fn new(cursor: &'a mut C) -> Self {
+    pub fn new(cursor: &'a mut C, changes: PrefixSet) -> Self {
         // Initialize the cursor with a single empty stack element.
-        Self {
+        let mut this = Self {
             cursor,
             can_skip_state: false,
             stack: vec![CursorSubNode::default()],
+            changes,
             __phantom: PhantomData::default(),
-        }
+        };
+
+        this.update_skip_state();
+        this
     }
 
     pub fn print(&self) {
@@ -424,10 +437,10 @@ mod tests {
 
         let db = create_test_rw_db();
         let tx = Transaction::new(db.as_ref()).unwrap();
-        let trie = StorageTrieCursor {
-            cursor: tx.cursor_dup_write::<tables::StoragesTrie2>().unwrap(),
-            hashed_address: H256::random(),
-        };
+        let trie = StorageTrieCursor::new(
+            tx.cursor_dup_write::<tables::StoragesTrie2>().unwrap(),
+            H256::random(),
+        );
         test_cursor(trie, inputs.into_iter(), expected);
     }
 
@@ -493,7 +506,8 @@ mod tests {
             trie.upsert(k.into(), v.marshal()).unwrap();
         }
 
-        let mut walker = TrieWalker::new(&mut trie);
+        let mut walker = TrieWalker::new(&mut trie, Default::default());
+        dbg!(walker.key().unwrap());
         assert!(walker.key().unwrap().is_empty());
 
         // We're traversing the path in lexigraphical order.
@@ -505,5 +519,69 @@ mod tests {
         // There should be 8 paths traversed in total from 3 branches.
         let got = walker.next().unwrap();
         assert!(got.is_none());
+    }
+
+    #[test]
+    fn cursor_traversal_within_prefix() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            // .with_env_filter(EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .try_init();
+
+        let db = create_test_rw_db();
+        let tx = Transaction::new(db.as_ref()).unwrap();
+
+        let mut trie = StorageTrieCursor::new(
+            tx.cursor_dup_write::<tables::StoragesTrie2>().unwrap(),
+            H256::random(),
+        );
+
+        let node_b1 = Node::new(
+            0b10100,
+            0b00100,
+            0,
+            vec![],
+            Some(hex!("c570b66136e99d07c6c6360769de1d9397805849879dd7c79cf0b8e6694bfb0e").into()),
+        );
+
+        // Account at slot 0 <-- This is the root node
+        trie.upsert(vec![].into(), node_b1.marshal()).unwrap();
+
+        let node_b2 = Node::new(
+            0b00010,
+            0,
+            0b00010,
+            vec![hex!("6fc81f58df057a25ca6b687a6db54aaa12fbea1baf03aa3db44d499fb8a7af65").into()],
+            None,
+        );
+
+        // Account at slot 2
+        trie.upsert(vec![0x2].into(), node_b2.marshal()).unwrap();
+
+        // No changes
+        let mut cursor = TrieWalker::new(&mut trie, Default::default());
+
+        assert_eq!(cursor.key(), Some(vec![])); // root
+        assert!(cursor.can_skip_state); // due to root_hash
+        cursor.next().unwrap(); // skips to end of trie
+        assert_eq!(cursor.key(), None);
+
+        // // // Some changes
+        // let mut changed = PrefixSet::new();
+        // changed.insert(&[0xD, 0x5]);
+        // let mut cursor = TrieWalker::new(&mut trie, changed);
+
+        // assert_eq!(cursor.key(), Some(vec![])); // root
+        // assert!(!cursor.can_skip_state);
+        // cursor.next().unwrap();
+        // assert_eq!(cursor.key(), Some(vec![0x2]));
+        // cursor.next().unwrap();
+        // assert_eq!(cursor.key(), Some(vec![0x2, 0x1]));
+        // cursor.next().unwrap();
+        // assert_eq!(cursor.key(), Some(vec![0x4]));
+
+        // cursor.next().unwrap();
+        // assert_eq!(cursor.key(), None); // end of trie
     }
 }
