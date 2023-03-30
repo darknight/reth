@@ -401,6 +401,25 @@ mod tests {
         triehash::trie_root::<KeccakHasher, _, _, _>(iter)
     }
 
+    // Prehashed keys to check subpaths etc.
+    fn assert_prehashed_storage_trie_root<I>(iter: I)
+    where
+        I: Iterator<Item = (H256, U256)>,
+    {
+        let data = iter
+            .map(|(k, v)| (k, reth_rlp::encode_fixed_size(&v).to_vec()))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut hb = HashBuilder::default();
+
+        data.iter().for_each(|(key, val)| {
+            let nibbles = Nibbles::unpack(key);
+            hb.add_leaf(nibbles, &val);
+        });
+
+        assert_eq!(hb.root(), trie_root(&data));
+    }
+
     // Hashes the keys, RLP encodes the values, compares the trie builder with the upstream root.
     fn assert_hashed_trie_root<'a, I, K>(iter: I)
     where
@@ -449,6 +468,22 @@ mod tests {
         proptest!(|(state: BTreeMap<H256, U256>)| {
             assert_hashed_trie_root(state.iter());
         });
+    }
+
+    #[test]
+    // This test uses the same data as the `trie::storage_root_regression`, to ensure
+    // that the hash builder works properly for data with shared prefixes.
+    fn hb_no_regression() {
+        let storage = BTreeMap::from(
+            [
+                ("1200000000000000000000000000000000000000000000000000000000000000", 0x42),
+                ("1400000000000000000000000000000000000000000000000000000000000000", 0x01),
+                ("3000000000000000000000000000000000000000000000000000000000E00000", 0x127a89),
+                ("3000000000000000000000000000000000000000000000000000000000E00001", 0x05),
+            ]
+            .map(|(slot, val)| (H256::from_str(slot).unwrap(), U256::from(val))),
+        );
+        assert_prehashed_storage_trie_root(storage.into_iter());
     }
 
     #[test]

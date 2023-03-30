@@ -368,6 +368,11 @@ mod tests {
         triehash::sec_trie_root::<KeccakHasher, _, _, _>(encoded_accounts)
     }
 
+    fn storage_root_prehashed<I: Iterator<Item = (H256, U256)>>(storage: I) -> H256 {
+        let encoded_storage = storage.map(|(k, v)| (k, encode_fixed_size(&v).to_vec()));
+        H256(triehash::trie_root::<KeccakHasher, _, _, _>(encoded_storage).0)
+    }
+
     fn storage_root<I: Iterator<Item = (H256, U256)>>(storage: I) -> H256 {
         let encoded_storage = storage.map(|(k, v)| (k, encode_fixed_size(&v).to_vec()));
 
@@ -525,6 +530,38 @@ mod tests {
         let mut account_rlp = Vec::with_capacity(account.length());
         account.encode(&mut account_rlp);
         account_rlp
+    }
+
+    #[tokio::test]
+    async fn storage_root_regression() {
+        let db = create_test_rw_db();
+        let mut tx = Transaction::new(db.as_ref()).unwrap();
+        // Some address whose hash starts with 0xB041
+        let address3 = Address::from_str("16b07afd1c635f77172e842a000ead9a2a222459").unwrap();
+        let key3 = keccak256(address3);
+        assert_eq!(key3[0], 0xB0);
+        assert_eq!(key3[1], 0x41);
+
+        let storage = BTreeMap::from(
+            [
+                ("1200000000000000000000000000000000000000000000000000000000000000", 0x42),
+                ("1400000000000000000000000000000000000000000000000000000000000000", 0x01),
+                ("3000000000000000000000000000000000000000000000000000000000E00000", 0x127a89),
+                ("3000000000000000000000000000000000000000000000000000000000E00001", 0x05),
+            ]
+            .map(|(slot, val)| (H256::from_str(slot).unwrap(), U256::from(val))),
+        );
+
+        let mut hashed_storage_cursor = tx.cursor_dup_write::<tables::HashedStorage>().unwrap();
+        for (hashed_slot, value) in storage.clone() {
+            hashed_storage_cursor.upsert(key3, StorageEntry { key: hashed_slot, value }).unwrap();
+        }
+        tx.commit().unwrap();
+
+        let account3_storage_root =
+            StorageRoot::new(tx.deref_mut(), address3, None).root().await.unwrap();
+        let expected_root = storage_root_prehashed(storage.into_iter());
+        assert_eq!(expected_root, account3_storage_root);
     }
 
     #[tokio::test]
@@ -693,8 +730,8 @@ mod tests {
         assert_eq!(node3.tree_mask, 0b0000);
         assert_eq!(node3.hash_mask, 0b0010);
 
-        assert_eq!(node3.root_hash, Some(account3_storage_root));
         assert_eq!(node3.hashes.len(), 1);
+        assert_eq!(node3.root_hash, Some(account3_storage_root));
 
         // Add an account
         // Some address whose hash starts with 0xB1
