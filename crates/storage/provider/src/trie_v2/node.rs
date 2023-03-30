@@ -186,11 +186,7 @@ impl<'a> BranchNode<'a> {
     /// Given the hash and state mask of children present, return an iterator over the stack items
     /// that match the mask.
     // TODO: Test this!
-    pub fn children(
-        &self,
-        state_mask: u16,
-        hash_mask: u16,
-    ) -> impl Iterator<Item = &'a Vec<u8>> + '_ {
+    pub fn children(&self, state_mask: u16, hash_mask: u16) -> impl Iterator<Item = H256> + '_ {
         let mut index = self.stack.len() - state_mask.count_ones() as usize;
         (0..16).filter_map(move |digit| {
             let mut child = None;
@@ -200,7 +196,7 @@ impl<'a> BranchNode<'a> {
                 }
                 index += 1;
             }
-            child
+            child.map(|child| H256::from_slice(&child[1..]))
         })
     }
 

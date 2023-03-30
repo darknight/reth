@@ -289,12 +289,12 @@ impl HashBuilder {
     /// Given the size of the longest common prefix, it proceeds to create a branch node
     /// from the state mask and existing stack state, and store its RLP to the top of the stack,
     /// after popping all the relevant elements from the stack.
-    fn push_branch_node(&mut self, len: usize) -> Vec<Vec<u8>> {
+    fn push_branch_node(&mut self, len: usize) -> Vec<H256> {
         let state_mask = self.groups[len];
         let hash_mask = self.hash_masks[len];
         let branch_node = BranchNode::new(&self.stack);
-        let children = branch_node.children(state_mask, hash_mask).cloned().collect::<Vec<_>>();
-        let rlp = BranchNode::new(&self.stack).rlp(state_mask);
+        let children = branch_node.children(state_mask, hash_mask).collect();
+        let rlp = branch_node.rlp(state_mask);
 
         // Clears the stack from the branch node elements
         let first_child_idx = self.stack.len() - state_mask.count_ones() as usize;
@@ -315,9 +315,7 @@ impl HashBuilder {
     /// to update the masks for the next level and store the branch node and the
     /// masks in the database. We will use that when consuming the intermediate nodes
     /// from the database to efficiently build the trie.
-    fn store_branch_node(&mut self, current: &Nibbles, len: usize, children: Vec<Vec<u8>>) {
-        let hashes = children.into_iter().map(|hash| H256::from_slice(&hash[1..])).collect();
-
+    fn store_branch_node(&mut self, current: &Nibbles, len: usize, children: Vec<H256>) {
         if len > 0 {
             self.hash_masks[len - 1] |= 1u16 << current[len - 1];
         }
@@ -332,7 +330,7 @@ impl HashBuilder {
                 self.groups[len],
                 self.tree_masks[len],
                 self.hash_masks[len],
-                hashes,
+                children,
                 None,
             );
 
