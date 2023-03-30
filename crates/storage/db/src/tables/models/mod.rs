@@ -15,7 +15,7 @@ use crate::{
     table::{Decode, Encode},
     Error,
 };
-use reth_primitives::{Address, Nibbles, NibblesSubKey, H256};
+use reth_primitives::{Address, StoredNibbles, StoredNibblesSubKey, H256};
 
 /// Macro that implements [`Encode`] and [`Decode`] for uint types.
 macro_rules! impl_uints {
@@ -46,7 +46,7 @@ macro_rules! impl_uints {
 
 impl_uints!(u64, u32, u16, u8);
 
-impl Encode for Nibbles {
+impl Encode for StoredNibbles {
     type Encoded = Vec<u8>;
 
     // Delegate to the Compact implementation
@@ -57,14 +57,14 @@ impl Encode for Nibbles {
     }
 }
 
-impl Decode for Nibbles {
+impl Decode for StoredNibbles {
     fn decode<B: AsRef<[u8]>>(value: B) -> Result<Self, Error> {
         let buf = value.as_ref();
         Ok(Self::from_compact(buf, buf.len()).0)
     }
 }
 
-impl Encode for NibblesSubKey {
+impl Encode for StoredNibblesSubKey {
     type Encoded = Vec<u8>;
 
     // Delegate to the Compact implementation
@@ -75,7 +75,7 @@ impl Encode for NibblesSubKey {
     }
 }
 
-impl Decode for NibblesSubKey {
+impl Decode for StoredNibblesSubKey {
     fn decode<B: AsRef<[u8]>>(value: B) -> Result<Self, Error> {
         let buf = value.as_ref();
         Ok(Self::from_compact(buf, buf.len()).0)

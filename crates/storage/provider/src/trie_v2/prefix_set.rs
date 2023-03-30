@@ -41,15 +41,15 @@ impl PrefixSet {
             let current = &self.keys[self.index];
 
             if current.starts_with(prefix) {
-                break true
+                return true
             }
 
             if current > prefix {
-                break false
+                return false
             }
 
             if self.index >= self.keys.len() - 1 {
-                break false
+                return false
             }
 
             self.index += 1;

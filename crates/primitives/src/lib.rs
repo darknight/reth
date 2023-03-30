@@ -66,7 +66,9 @@ pub use peer::{PeerId, WithPeerId};
 pub use receipt::{Receipt, ReceiptWithBloom};
 pub use revm_primitives::JumpMap;
 pub use serde_helper::JsonU256;
-pub use storage::{Nibbles, NibblesSubKey, StorageEntry, StorageTrieEntry, StorageTrieEntry2};
+pub use storage::{
+    StorageEntry, StorageTrieEntry, StorageTrieEntry2, StoredNibbles, StoredNibblesSubKey,
+};
 pub use transaction::{
     util::secp256k1::sign_message, AccessList, AccessListItem, AccessListWithGasUsed,
     FromRecoveredTransaction, IntoRecoveredTransaction, InvalidTransactionError, Signature,

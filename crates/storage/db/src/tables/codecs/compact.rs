@@ -34,8 +34,8 @@ macro_rules! impl_compression_for_compact {
 }
 
 impl_compression_for_compact!(
-    Nibbles,
-    NibblesSubKey,
+    StoredNibbles,
+    StoredNibblesSubKey,
     StorageTrieEntry2,
     Header,
     Account,

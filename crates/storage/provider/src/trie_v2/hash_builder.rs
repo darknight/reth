@@ -1,11 +1,10 @@
+use super::nibbles::Nibbles;
 use crate::trie_v2::node::{
     rlp_hash, BranchNode, BranchNodeCompact, ExtensionNode, LeafNode, KECCAK_LENGTH,
 };
 use reth_primitives::{keccak256, proofs::EMPTY_ROOT, H256};
 use std::fmt::Debug;
 use tokio::sync::mpsc;
-
-use super::nibbles::Nibbles;
 
 #[derive(Clone)]
 enum HashBuilderValue {
@@ -56,7 +55,7 @@ pub(crate) fn assert_subset(sub: u16, sup: u16) {
 
 type BranchNodeSender = mpsc::UnboundedSender<(Nibbles, BranchNodeCompact)>;
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct HashBuilder {
     key: Nibbles,
     stack: Vec<Vec<u8>>,

@@ -30,8 +30,8 @@ use crate::{
     },
 };
 use reth_primitives::{
-    Account, Address, BlockHash, BlockNumber, Bytecode, Header, IntegerList, Nibbles,
-    NibblesSubKey, Receipt, StorageEntry, StorageTrieEntry, StorageTrieEntry2, TransactionSigned,
+    Account, Address, BlockHash, BlockNumber, Bytecode, Header, IntegerList, Receipt, StorageEntry,
+    StorageTrieEntry, StorageTrieEntry2, StoredNibbles, StoredNibblesSubKey, TransactionSigned,
     TransitionId, TxHash, TxNumber, H256,
 };
 
@@ -293,7 +293,7 @@ dupsort!(
 
 table!(
     /// Stores the current state's Merkle Patricia Tree.
-    ( AccountsTrie2 ) Nibbles | Vec<u8>
+    ( AccountsTrie2 ) StoredNibbles | Vec<u8>
 );
 
 table!(
@@ -308,7 +308,7 @@ dupsort!(
 
 dupsort!(
     /// From HashedAddress => NibblesSubKey => Intermediate value
-    ( StoragesTrie2 ) H256 | [NibblesSubKey] StorageTrieEntry2
+    ( StoragesTrie2 ) H256 | [StoredNibblesSubKey] StorageTrieEntry2
 );
 
 table!(

@@ -1,4 +1,5 @@
 use super::{
+    nibbles::Nibbles,
     node::{BranchNodeCompact, BranchNodeCompact as Node},
     prefix_set::PrefixSet,
 };
@@ -7,9 +8,26 @@ use reth_db::{
     table::Key,
     tables, Error as DbError,
 };
-use reth_primitives::{Nibbles, NibblesSubKey, H256};
+use reth_primitives::{StoredNibbles, StoredNibblesSubKey, H256};
 use std::marker::PhantomData;
 use thiserror::Error;
+
+fn increment_key(unpacked: &[u8]) -> Option<Vec<u8>> {
+    let mut out = unpacked.to_vec();
+
+    for i in (0..out.len()).rev() {
+        let nibble = out[i];
+        assert!(nibble < 0x10);
+        if nibble < 0xf {
+            out[i] += 1;
+            return Some(out)
+        } else {
+            out[i] = 0;
+        }
+    }
+
+    None
+}
 
 #[derive(Debug, Clone)]
 pub struct CursorSubNode {
@@ -111,17 +129,17 @@ pub trait TrieCursor<K: Key> {
     fn upsert(&mut self, key: K, value: Vec<u8>) -> Result<()>;
 }
 
-struct AccountTrieCursor<C>(C);
+pub struct AccountTrieCursor<C>(pub C);
 
-impl<'a, C> TrieCursor<Nibbles> for AccountTrieCursor<C>
+impl<'a, C> TrieCursor<StoredNibbles> for AccountTrieCursor<C>
 where
     C: DbCursorRO<'a, tables::AccountsTrie2> + DbCursorRW<'a, tables::AccountsTrie2>,
 {
-    fn seek_exact(&mut self, key: Nibbles) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    fn seek_exact(&mut self, key: StoredNibbles) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         Ok(self.0.seek_exact(key.into())?.map(|value| (value.0.inner.to_vec(), value.1)))
     }
 
-    fn seek(&mut self, key: Nibbles) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    fn seek(&mut self, key: StoredNibbles) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         Ok(self.0.seek(key.into())?.map(|value| (value.0.inner.to_vec(), value.1)))
     }
 
@@ -129,7 +147,7 @@ where
         Ok(self.0.delete_current()?)
     }
 
-    fn upsert(&mut self, key: Nibbles, value: Vec<u8>) -> Result<()> {
+    fn upsert(&mut self, key: StoredNibbles, value: Vec<u8>) -> Result<()> {
         Ok(self.0.upsert(key, value)?)
     }
 }
@@ -145,14 +163,14 @@ impl<C> StorageTrieCursor<C> {
     }
 }
 
-impl<'a, C> TrieCursor<NibblesSubKey> for StorageTrieCursor<C>
+impl<'a, C> TrieCursor<StoredNibblesSubKey> for StorageTrieCursor<C>
 where
     C: DbDupCursorRO<'a, tables::StoragesTrie2>
         + DbDupCursorRW<'a, tables::StoragesTrie2>
         + DbCursorRO<'a, tables::StoragesTrie2>
         + DbCursorRW<'a, tables::StoragesTrie2>,
 {
-    fn seek_exact(&mut self, key: NibblesSubKey) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    fn seek_exact(&mut self, key: StoredNibblesSubKey) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         Ok(self
             .cursor
             .seek_by_key_subkey(self.hashed_address, key.clone())?
@@ -160,7 +178,7 @@ where
             .map(|value| (value.nibbles.inner.to_vec(), value.node)))
     }
 
-    fn seek(&mut self, key: NibblesSubKey) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    fn seek(&mut self, key: StoredNibblesSubKey) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         Ok(self
             .cursor
             .seek_by_key_subkey(self.hashed_address, key.clone())?
@@ -171,7 +189,7 @@ where
         Ok(self.cursor.delete_current()?)
     }
 
-    fn upsert(&mut self, key: NibblesSubKey, value: Vec<u8>) -> Result<()> {
+    fn upsert(&mut self, key: StoredNibblesSubKey, value: Vec<u8>) -> Result<()> {
         if let Some(entry) = self.cursor.seek_by_key_subkey(self.hashed_address, key.clone())? {
             // "seek exact"
             if entry.nibbles == key {
@@ -345,18 +363,28 @@ impl<'a, K: Key + From<Vec<u8>>, C: TrieCursor<K>> TrieWalker<'a, K, C> {
     }
 
     #[tracing::instrument(skip(self))]
-    fn key(&self) -> Option<Vec<u8>> {
+    pub fn key(&self) -> Option<Vec<u8>> {
         self.stack.last().map(|n| n.full_key())
     }
 
     #[tracing::instrument(skip(self))]
-    fn hash(&self) -> Option<H256> {
+    pub fn hash(&self) -> Option<H256> {
         self.stack.last().and_then(|n| n.hash())
     }
 
     #[tracing::instrument(skip(self))]
-    fn children_are_in_trie(&self) -> bool {
+    pub fn children_are_in_trie(&self) -> bool {
         self.stack.last().map_or(false, |n| n.tree_flag())
+    }
+
+    pub fn first_uncovered_prefix(&self) -> Option<Vec<u8>> {
+        self.key().as_ref().and_then(|key| {
+            if self.can_skip_state {
+                increment_key(key).map(|k| Nibbles::from(k).pack())
+            } else {
+                Some(Nibbles::from(key.as_slice()).pack())
+            }
+        })
     }
 
     #[tracing::instrument(skip(self))]
