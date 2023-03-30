@@ -256,7 +256,6 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StorageRoot<'a, TX> {
                 }
                 hash_builder.add_leaf(unpacked_loc, reth_rlp::encode_fixed_size(&value).as_ref());
                 storage = hashed_storage_cursor.next_dup()?.map(|(_, v)| v);
-                println!("STORAGE NEXT {storage:?}");
             }
         }
 

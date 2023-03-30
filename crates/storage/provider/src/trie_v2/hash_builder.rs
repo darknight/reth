@@ -257,11 +257,11 @@ impl HashBuilder {
 
             // Insert branch nodes in the stack
             if !succeeding.is_empty() || preceding_exists {
+                // Pushes the corresponding branch node to the stack
+                let children = self.push_branch_node(len);
                 // Need to store the branch node in an efficient format
                 // outside of the hash builder
-                self.store_branch_node(&current, len);
-                // Pushes the corresponding branch node to the stack
-                self.push_branch_node(len);
+                self.store_branch_node(&current, len, children);
             }
 
             self.groups.resize(len, 0u16);
@@ -289,8 +289,11 @@ impl HashBuilder {
     /// Given the size of the longest common prefix, it proceeds to create a branch node
     /// from the state mask and existing stack state, and store its RLP to the top of the stack,
     /// after popping all the relevant elements from the stack.
-    fn push_branch_node(&mut self, len: usize) {
+    fn push_branch_node(&mut self, len: usize) -> Vec<Vec<u8>> {
         let state_mask = self.groups[len];
+        let hash_mask = self.hash_masks[len];
+        let branch_node = BranchNode::new(&self.stack);
+        let children = branch_node.children(state_mask, hash_mask).cloned().collect::<Vec<_>>();
         let rlp = BranchNode::new(&self.stack).rlp(state_mask);
 
         // Clears the stack from the branch node elements
@@ -305,19 +308,15 @@ impl HashBuilder {
         tracing::debug!("pushing branch node with {:b} mask from stack", state_mask);
         tracing::trace!(rlp = hex::encode(&rlp), "branch node rlp");
         self.stack.push(rlp);
+        children
     }
 
     /// Given the current nibble prefix and the highest common prefix length, proceeds
     /// to update the masks for the next level and store the branch node and the
     /// masks in the database. We will use that when consuming the intermediate nodes
     /// from the database to efficiently build the trie.
-    fn store_branch_node(&mut self, current: &Nibbles, len: usize) {
-        let state_mask = self.groups[len];
-        let hash_mask = self.hash_masks[len];
-        let hashes = BranchNode::new(&self.stack)
-            .children(state_mask, hash_mask)
-            .map(|hash| H256::from_slice(&hash[1..]))
-            .collect();
+    fn store_branch_node(&mut self, current: &Nibbles, len: usize, children: Vec<Vec<u8>>) {
+        let hashes = children.into_iter().map(|hash| H256::from_slice(&hash[1..])).collect();
 
         if len > 0 {
             self.hash_masks[len - 1] |= 1u16 << current[len - 1];
@@ -338,7 +337,6 @@ impl HashBuilder {
             );
 
             if len == 0 {
-                println!("LEN IS ZERO");
                 n.root_hash = Some(self.current_root());
             }
 
