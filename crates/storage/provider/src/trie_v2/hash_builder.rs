@@ -338,6 +338,7 @@ impl HashBuilder {
             );
 
             if len == 0 {
+                println!("LEN IS ZERO");
                 n.root_hash = Some(self.current_root());
             }
 
@@ -346,9 +347,7 @@ impl HashBuilder {
             tracing::debug!(node = ?n, "intermediate node");
             let common_prefix = current.slice(0, len);
             if let Some(tx) = &self.branch_node_sender {
-                if !common_prefix.is_empty() {
-                    let _ = tx.send((common_prefix, n));
-                }
+                let _ = tx.send((common_prefix, n));
             }
         }
     }

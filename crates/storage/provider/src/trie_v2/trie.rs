@@ -47,7 +47,7 @@ impl<'a, TX> StateRoot<'a, TX> {
             tx,
             branch_node_update_sender: None,
             account_changes: PrefixSet::default(),
-            storage_changes: PrefixSet::default(),
+            storage_changes: HashMap::default(),
         }
     }
 
@@ -61,7 +61,7 @@ impl<'a, TX> StateRoot<'a, TX> {
         self
     }
 
-    pub fn with_storage_changes(mut self, changes: PrefixSet) -> Self {
+    pub fn with_storage_changes(mut self, changes: HashMap<H256, PrefixSet>) -> Self {
         self.storage_changes = changes;
         self
     }
@@ -217,7 +217,7 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StorageRoot<'a, TX> {
             self.tx.cursor_dup_write::<tables::StoragesTrie2>()?,
             self.hashed_address,
         );
-        let mut walker = TrieWalker::new(&mut trie_cursor, PrefixSet::default() /* TODO: */);
+        let mut walker = TrieWalker::new(&mut trie_cursor, self.storage_changes.clone());
 
         let (storage_branch_node_tx, mut storage_branch_node_rx) = unbounded_channel();
         let mut hash_builder =
@@ -256,6 +256,7 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StorageRoot<'a, TX> {
                 }
                 hash_builder.add_leaf(unpacked_loc, reth_rlp::encode_fixed_size(&value).as_ref());
                 storage = hashed_storage_cursor.next_dup()?.map(|(_, v)| v);
+                println!("STORAGE NEXT {storage:?}");
             }
         }
 
@@ -531,10 +532,10 @@ mod tests {
         let ether = U256::from(1e18);
         let storage = BTreeMap::from(
             [
-                ("1200000000000000000000000000000000000000000000000000000000000000", 0x42_u128),
-                ("1400000000000000000000000000000000000000000000000000000000000000", 0x01_u128),
-                ("3000000000000000000000000000000000000000000000000000000000E00000", 0x127a89_u128),
-                ("3000000000000000000000000000000000000000000000000000000000E00001", 0x05_u128),
+                ("1200000000000000000000000000000000000000000000000000000000000000", 0x42),
+                ("1400000000000000000000000000000000000000000000000000000000000000", 0x01),
+                ("3000000000000000000000000000000000000000000000000000000000E00000", 0x127a89),
+                ("3000000000000000000000000000000000000000000000000000000000E00001", 0x05),
             ]
             .map(|(slot, val)| (H256::from_str(slot).unwrap(), U256::from(val))),
         );
@@ -542,7 +543,6 @@ mod tests {
         let db = create_test_rw_db();
         let mut tx = Transaction::new(db.as_ref()).unwrap();
 
-        // TODO: let mut hashed_accounts = txn.cursor(tables::HashedAccount).unwrap();
         let mut hashed_account_cursor = tx.cursor_write::<tables::HashedAccount>().unwrap();
         let mut hashed_storage_cursor = tx.cursor_dup_write::<tables::HashedStorage>().unwrap();
 
@@ -618,10 +618,7 @@ mod tests {
         hashed_account_cursor.upsert(key6, account6).unwrap();
         hash_builder.add_leaf(Nibbles::unpack(key6), &encode_account(account6, None));
 
-        // ----------------------------------------------------------------
         // Populate account & storage trie DB tables
-        // ----------------------------------------------------------------
-
         let expected_root =
             H256::from_str("72861041bc90cd2f93777956f058a545412b56de79af5eb6b8075fe2eabbe015")
                 .unwrap();
@@ -644,10 +641,7 @@ mod tests {
         let loader = StateRoot::new(tx.deref()).with_branch_node_update_sender(branch_node_tx);
         assert_eq!(loader.root().await.unwrap(), computed_expected_root);
 
-        // ----------------------------------------------------------------
         // Check account trie
-        // ----------------------------------------------------------------
-
         drop(loader);
         let branch_node_stream = UnboundedReceiverStream::new(branch_node_rx);
         let updates = branch_node_stream.collect::<Vec<_>>().await;
@@ -680,25 +674,29 @@ mod tests {
         assert_eq!(node2a.root_hash, None);
         assert_eq!(node2a.hashes.len(), 1);
 
-        // ----------------------------------------------------------------
         // Check storage trie
-        // ----------------------------------------------------------------
-        // let node_map = read_all_nodes(txn.cursor(tables::TrieStorage).unwrap());
-        // assert_eq!(node_map.len(), 1);
+        let storage_updates = updates
+            .iter()
+            .filter_map(|u| {
+                if let BranchNodeUpdate::Storage(_, nibbles, node) = u {
+                    Some((nibbles, node))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(storage_updates.len(), 1);
 
-        // let node3 = &node_map[&key3.0.to_vec()];
+        let (nibbles3, node3) = storage_updates.first().unwrap();
+        assert!(nibbles3.get_data().is_empty());
+        assert_eq!(node3.state_mask, 0b1010);
+        assert_eq!(node3.tree_mask, 0b0000);
+        assert_eq!(node3.hash_mask, 0b0010);
 
-        // assert_eq!(node3.state_mask, 0b1010);
-        // assert_eq!(node3.tree_mask, 0b0000);
-        // assert_eq!(node3.hash_mask, 0b0010);
+        assert_eq!(node3.root_hash, Some(account3_storage_root));
+        assert_eq!(node3.hashes.len(), 1);
 
-        // assert_eq!(node3.root_hash, Some(storage_root));
-        // assert_eq!(node3.hashes.len(), 1);
-
-        // ----------------------------------------------------------------
         // Add an account
-        // ----------------------------------------------------------------
-
         // Some address whose hash starts with 0xB1
         let address4b = Address::from_str("4f61f2d5ebd991b85aa1677db97307caf5215c91").unwrap();
         let key4b = keccak256(address4b);
@@ -746,7 +744,6 @@ mod tests {
         assert_eq!(node1a.hashes[0], node1b.hashes[0]);
         assert_eq!(node1a.hashes[1], node1b.hashes[2]);
 
-        // let node2b = &node_map[&vec![0xB, 0x0]];
         let (nibbles2b, node2b) = account_updates.first().unwrap();
         assert_eq!(nibbles2b.get_data(), [0xB, 0x0]);
         assert_eq!(node2a, node2b);
