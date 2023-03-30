@@ -363,10 +363,7 @@ impl<'a, K: Key + From<Vec<u8>>, C: TrieCursor<K>> TrieWalker<'a, K, C> {
     fn update_skip_state(&mut self) {
         self.can_skip_state = if let Some(key) = self.key() {
             tracing::trace!("Key: {:?}", hex::encode(&key));
-            // let s = [self.prefix.as_slice(), key.as_slice()].concat();
-            // tracing::trace!("Checking if prefix exists {:?}", hex::encode(&s));
-
-            let contains_prefix = false; // !self.changed.contains(s.as_slice());
+            let contains_prefix = self.changes.contains(key.as_slice());
             let hash_flag = self.stack.last().unwrap().hash_flag();
             let val = !contains_prefix && self.stack.last().unwrap().hash_flag();
             tracing::trace!(
@@ -546,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_traversal_within_prefix() {
+    fn cursor_rootnode_with_changesets() {
         let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::TRACE)
             // .with_env_filter(EnvFilter::from_default_env())
@@ -561,51 +558,62 @@ mod tests {
             H256::random(),
         );
 
-        let node_b1 = Node::new(
-            0b10100,
-            0b00100,
-            0,
-            vec![],
-            Some(hex!("c570b66136e99d07c6c6360769de1d9397805849879dd7c79cf0b8e6694bfb0e").into()),
-        );
-
-        // Account at slot 0 <-- This is the root node
-        trie.upsert(vec![].into(), node_b1.marshal()).unwrap();
-
-        let node_b2 = Node::new(
-            0b00010,
-            0,
-            0b00010,
-            vec![hex!("6fc81f58df057a25ca6b687a6db54aaa12fbea1baf03aa3db44d499fb8a7af65").into()],
-            None,
-        );
-
-        // Account at slot 2
-        trie.upsert(vec![0x2].into(), node_b2.marshal()).unwrap();
+        for (k, v) in vec![
+            (
+                vec![],
+                Node::new(
+                    // 2 and 4 are set
+                    0b10100,
+                    0b00100,
+                    0,
+                    vec![],
+                    Some(
+                        hex!("c570b66136e99d07c6c6360769de1d9397805849879dd7c79cf0b8e6694bfb0e")
+                            .into(),
+                    ),
+                ),
+            ),
+            (
+                vec![0x2],
+                Node::new(
+                    // 1 is set
+                    0b00010,
+                    0,
+                    0b00010,
+                    vec![hex!("6fc81f58df057a25ca6b687a6db54aaa12fbea1baf03aa3db44d499fb8a7af65")
+                        .into()],
+                    None,
+                ),
+            ),
+        ] {
+            trie.upsert(k.into(), v.marshal()).unwrap();
+        }
 
         // No changes
         let mut cursor = TrieWalker::new(&mut trie, Default::default());
-
         assert_eq!(cursor.key(), Some(vec![])); // root
         assert!(cursor.can_skip_state); // due to root_hash
         cursor.next().unwrap(); // skips to end of trie
         assert_eq!(cursor.key(), None);
 
-        // // // Some changes
-        // let mut changed = PrefixSet::new();
-        // changed.insert(&[0xD, 0x5]);
-        // let mut cursor = TrieWalker::new(&mut trie, changed);
+        // Some changes
+        let mut changed = PrefixSet::new();
+        // We insert somethign that's not part of the existing trie/prefix.
+        changed.insert(&[0xD, 0x5]);
+        let mut cursor = TrieWalker::new(&mut trie, changed);
 
-        // assert_eq!(cursor.key(), Some(vec![])); // root
-        // assert!(!cursor.can_skip_state);
-        // cursor.next().unwrap();
-        // assert_eq!(cursor.key(), Some(vec![0x2]));
-        // cursor.next().unwrap();
-        // assert_eq!(cursor.key(), Some(vec![0x2, 0x1]));
-        // cursor.next().unwrap();
-        // assert_eq!(cursor.key(), Some(vec![0x4]));
+        // root node
+        assert_eq!(cursor.key(), Some(vec![]));
+        // should not be able to skip state due to the changed values
+        assert!(!cursor.can_skip_state);
+        cursor.next().unwrap();
+        assert_eq!(cursor.key(), Some(vec![0x2]));
+        cursor.next().unwrap();
+        assert_eq!(cursor.key(), Some(vec![0x2, 0x1]));
+        cursor.next().unwrap();
+        assert_eq!(cursor.key(), Some(vec![0x4]));
 
-        // cursor.next().unwrap();
-        // assert_eq!(cursor.key(), None); // end of trie
+        cursor.next().unwrap();
+        assert_eq!(cursor.key(), None); // end of trie
     }
 }
