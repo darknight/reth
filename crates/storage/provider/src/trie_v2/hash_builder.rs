@@ -53,7 +53,7 @@ pub(crate) fn assert_subset(sub: u16, sup: u16) {
     assert_eq!(sub & sup, sub);
 }
 
-type BranchNodeSender = mpsc::UnboundedSender<(Nibbles, BranchNodeCompact)>;
+pub type BranchNodeSender = mpsc::UnboundedSender<(Nibbles, BranchNodeCompact)>;
 
 #[derive(Clone, Debug, Default)]
 pub struct HashBuilder {
@@ -67,16 +67,16 @@ pub struct HashBuilder {
 
     is_in_db_trie: bool,
 
-    store_tx: Option<BranchNodeSender>,
+    branch_node_sender: Option<BranchNodeSender>,
 }
 
 impl HashBuilder {
     pub fn new(store_tx: Option<BranchNodeSender>) -> Self {
-        Self { store_tx, ..Default::default() }
+        Self { branch_node_sender: store_tx, ..Default::default() }
     }
 
-    pub fn with_store_tx(mut self, tx: BranchNodeSender) -> Self {
-        self.store_tx = Some(tx);
+    pub fn with_branch_node_sender(mut self, tx: BranchNodeSender) -> Self {
+        self.branch_node_sender = Some(tx);
         self
     }
 
@@ -345,7 +345,7 @@ impl HashBuilder {
             // other side of the HashBuilder
             tracing::debug!(node = ?n, "intermediate node");
             let common_prefix = current.slice(0, len);
-            if let Some(tx) = &self.store_tx {
+            if let Some(tx) = &self.branch_node_sender {
                 if !common_prefix.is_empty() {
                     let _ = tx.send((common_prefix, n));
                 }
