@@ -559,12 +559,6 @@ mod tests {
         T: TrieCursor<K>,
         I: Iterator<Item = (Vec<u8>, BranchNodeCompact)>,
     {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            // .with_env_filter(EnvFilter::from_default_env())
-            .with_writer(std::io::stderr)
-            .try_init();
-
         for (k, v) in inputs {
             trie.upsert(k.into(), v.marshal()).unwrap();
         }
@@ -585,12 +579,6 @@ mod tests {
 
     #[test]
     fn cursor_rootnode_with_changesets() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            // .with_env_filter(EnvFilter::from_default_env())
-            .with_writer(std::io::stderr)
-            .try_init();
-
         let db = create_test_rw_db();
         let tx = Transaction::new(db.as_ref()).unwrap();
 
