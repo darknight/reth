@@ -94,7 +94,7 @@ impl<DB: Database> Stage<DB> for StorageHashingStage {
         // account otherwise take changesets aggregate the sets and apply hashing to
         // AccountHashing table. Also, if we start from genesis, we need to hash from scratch, as
         // genesis accounts are not in changeset, along with their storages.
-        if to_transition - from_transition > self.clean_threshold || stage_progress == 0 {
+        if to_transition - from_transition > 0 || stage_progress == 0 {
             let mut checkpoint = self.get_checkpoint(tx)?;
 
             if checkpoint.address.is_none() ||

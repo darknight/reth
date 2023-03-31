@@ -31,4 +31,6 @@ enum StageEnum {
     Execution,
     Hashing,
     Merkle,
+    HashedAccounts,
+    HashedStorage,
 }

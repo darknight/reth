@@ -13,7 +13,9 @@ use reth_db::{
 };
 use reth_primitives::ChainSpec;
 use reth_staged_sync::utils::{chainspec::genesis_value_parser, init::insert_genesis_state};
-use reth_stages::stages::{ACCOUNT_HASHING, EXECUTION, MERKLE_EXECUTION, STORAGE_HASHING};
+use reth_stages::stages::{
+    ACCOUNT_HASHING, EXECUTION, MERKLE_EXECUTION, MERKLE_UNWIND, STORAGE_HASHING,
+};
 use std::sync::Arc;
 use tracing::info;
 
@@ -60,6 +62,20 @@ impl Command {
         let tool = DbTool::new(&db)?;
 
         match &self.stage {
+            StageEnum::HashedAccounts => {
+                tool.db.update(|tx| {
+                    tx.clear::<tables::HashedAccount>()?;
+                    tx.put::<tables::SyncStage>(ACCOUNT_HASHING.0.to_string(), 0)?;
+                    Ok::<_, eyre::Error>(())
+                })??;
+            }
+            StageEnum::HashedStorage => {
+                tool.db.update(|tx| {
+                    tx.clear::<tables::HashedStorage>()?;
+                    tx.put::<tables::SyncStage>(STORAGE_HASHING.0.to_string(), 0)?;
+                    Ok::<_, eyre::Error>(())
+                })??;
+            }
             StageEnum::Execution => {
                 tool.db.update(|tx| {
                     tx.clear::<tables::PlainAccountState>()?;
@@ -97,6 +113,7 @@ impl Command {
                         Vec::new(),
                     )?;
                     tx.put::<tables::SyncStage>(MERKLE_EXECUTION.0.to_string(), 0)?;
+                    tx.put::<tables::SyncStage>(MERKLE_UNWIND.0.to_string(), 0)?;
                     Ok::<_, eyre::Error>(())
                 })??;
             }

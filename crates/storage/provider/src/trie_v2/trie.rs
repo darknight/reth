@@ -316,16 +316,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Transaction;
+    use crate::{
+        trie::{DBTrieLoader, TrieProgress},
+        Transaction,
+    };
     use proptest::{prelude::ProptestConfig, proptest};
     use reth_db::{
-        cursor::DbCursorRW, mdbx::test_utils::create_test_rw_db, tables, transaction::DbTxMut,
+        cursor::DbCursorRW, database::Database, mdbx::test_utils::create_test_rw_db, tables,
+        transaction::DbTxMut,
     };
     use reth_primitives::{keccak256, proofs::KeccakHasher, Account, Address, H256, U256};
     use reth_rlp::encode_fixed_size;
     use std::{
         collections::BTreeMap,
         ops::{Deref, DerefMut, Mul},
+        path::PathBuf,
         str::FromStr,
     };
     use tokio::sync::mpsc;
@@ -526,6 +531,34 @@ mod tests {
         let mut account_rlp = Vec::with_capacity(account.length());
         account.encode(&mut account_rlp);
         account_rlp
+    }
+
+    #[tokio::test]
+    async fn sepolia_repro() {
+        let path = PathBuf::from_str(
+            "/Users/georgios/paradigm/reth/trie-debugging/sepolia-db-2320000-master",
+        )
+        .unwrap();
+        use reth_db::mdbx::{Env, WriteMap};
+        let db = Env::<WriteMap>::open(&path, reth_db::mdbx::EnvKind::RW).unwrap();
+        let tx = db.tx_mut().unwrap();
+        let loader = StateRoot::new(&tx);
+        let incremental_root = loader.root().await.unwrap();
+
+        dbg!(&incremental_root);
+
+        let mut cita_loader = DBTrieLoader::new(&tx);
+        let cita_root = loop {
+            let root = cita_loader.calculate_root().unwrap();
+            match root {
+                TrieProgress::Complete(root) => break root,
+                _ => continue,
+            }
+        };
+
+        dbg!(&cita_root, &incremental_root);
+
+        assert_eq!(incremental_root, cita_root);
     }
 
     #[tokio::test]
