@@ -43,6 +43,7 @@ impl<'env, K: TransactionKind, E: EnvironmentKind> Tx<'env, K, E> {
                 .map_err(|e| Error::InitCursor(e.into()))?,
             table: T::NAME,
             _dbi: PhantomData,
+            value_buffer: vec![],
         })
     }
 }

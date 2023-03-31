@@ -28,6 +28,14 @@ pub struct Cursor<'tx, K: TransactionKind, T: Table> {
     pub table: &'static str,
     /// Phantom data to enforce encoding/decoding.
     pub _dbi: std::marker::PhantomData<T>,
+    pub value_buffer: Vec<u8>,
+}
+
+impl<'tx, K: TransactionKind, T: Table> Cursor<'_, K, T> {
+    fn compress_value(&mut self, value: T::Value) {
+        self.value_buffer.truncate(0);
+        value.compress_to_buf(&mut self.value_buffer);
+    }
 }
 
 /// Takes `(key, value)` from the database and decodes it appropriately.
@@ -211,22 +219,28 @@ impl<'tx, T: Table> DbCursorRW<'tx, T> for Cursor<'tx, RW, T> {
     /// exists in a table, and insert a new row if the specified value doesn't already exist
     fn upsert(&mut self, key: T::Key, value: T::Value) -> Result<(), Error> {
         // Default `WriteFlags` is UPSERT
+        self.compress_value(value);
+
         self.inner
-            .put(key.encode().as_ref(), value.compress().as_ref(), WriteFlags::UPSERT)
+            .put(key.encode().as_ref(), self.value_buffer.as_ref(), WriteFlags::UPSERT)
             .map_err(|e| Error::Write(e.into()))
     }
 
     fn insert(&mut self, key: T::Key, value: T::Value) -> Result<(), Error> {
+        self.compress_value(value);
+
         self.inner
-            .put(key.encode().as_ref(), value.compress().as_ref(), WriteFlags::NO_OVERWRITE)
+            .put(key.encode().as_ref(), self.value_buffer.as_ref(), WriteFlags::NO_OVERWRITE)
             .map_err(|e| Error::Write(e.into()))
     }
 
     /// Appends the data to the end of the table. Consequently, the append operation
     /// will fail if the inserted key is less than the last table key
     fn append(&mut self, key: T::Key, value: T::Value) -> Result<(), Error> {
+        self.compress_value(value);
+
         self.inner
-            .put(key.encode().as_ref(), value.compress().as_ref(), WriteFlags::APPEND)
+            .put(key.encode().as_ref(), self.value_buffer.as_ref(), WriteFlags::APPEND)
             .map_err(|e| Error::Write(e.into()))
     }
 
@@ -241,8 +255,10 @@ impl<'tx, T: DupSort> DbDupCursorRW<'tx, T> for Cursor<'tx, RW, T> {
     }
 
     fn append_dup(&mut self, key: T::Key, value: T::Value) -> Result<(), Error> {
+        self.compress_value(value);
+
         self.inner
-            .put(key.encode().as_ref(), value.compress().as_ref(), WriteFlags::APPEND_DUP)
+            .put(key.encode().as_ref(), self.value_buffer.as_ref(), WriteFlags::APPEND_DUP)
             .map_err(|e| Error::Write(e.into()))
     }
 }
