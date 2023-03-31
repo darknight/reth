@@ -82,8 +82,12 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
     pub async fn root(&self) -> Result<H256, StateRootError> {
         tracing::debug!(target: "loader", "calculating state root");
 
+        dbg!("OK");
+
         let mut hashed_account_cursor = self.tx.cursor_read::<tables::HashedAccount>()?;
+        dbg!("OK");
         let mut trie_cursor = AccountTrieCursor(self.tx.cursor_write::<tables::AccountsTrie2>()?);
+        dbg!("OK");
         let mut walker = TrieWalker::new(&mut trie_cursor, self.account_changes.clone());
 
         let (account_branch_node_tx, mut account_branch_node_rx) = unbounded_channel();
@@ -92,8 +96,10 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
 
         while let Some(key) = walker.key() {
             if walker.can_skip_state {
+                let key = Nibbles::unpack(key);
+                tracing::info!(?key, "skipping state");
                 hash_builder.add_branch_from_db(
-                    Nibbles::unpack(key),
+                    key,
                     walker.hash().clone().unwrap(),
                     walker.children_are_in_trie(),
                 );
@@ -104,7 +110,10 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
                     uncovered.resize(32, 0);
                     H256::from_slice(uncovered.as_slice())
                 }
-                None => break,
+                None => {
+                    tracing::info!("skipping, no prefix");
+                    break
+                }
             };
 
             walker.next().unwrap(); // TODO: handle
@@ -118,6 +127,7 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
 
                 if let Some(ref key) = trie_key {
                     if Nibbles::from(key.as_slice()) < unpacked_key {
+                        tracing::info!("breaking, already detected");
                         break
                     }
                 }

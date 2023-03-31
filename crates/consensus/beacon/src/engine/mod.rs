@@ -316,6 +316,7 @@ where
 
         // Set the next pipeline state.
         loop {
+            tracing::info!("processing msgs");
             // Process all incoming messages first.
             while let Poll::Ready(Some(msg)) = this.message_rx.poll_next_unpin(cx) {
                 match msg {
@@ -347,6 +348,8 @@ where
                 }
             }
 
+            tracing::error!("forkchoice {:?}", &this.forkchoice_state);
+
             // Lookup the forkchoice state. We can't launch the pipeline without the tip.
             let forkchoice_state = match &this.forkchoice_state {
                 Some(state) => *state,
@@ -371,6 +374,9 @@ where
                                         let minimum_pipeline_progress =
                                             pipeline.minimum_progress().unwrap_or_default();
                                         if this.has_reached_max_block(minimum_pipeline_progress) {
+                                            tracing::info!(
+                                                "consensus engine reached max block, not polling"
+                                            );
                                             return Poll::Ready(Ok(()))
                                         }
                                     }
@@ -401,6 +407,7 @@ where
                     }
                 }
                 PipelineState::Idle(pipeline) => {
+                    tracing::info!("idle pipeline");
                     this.next_pipeline_state(pipeline, forkchoice_state)
                 }
             };

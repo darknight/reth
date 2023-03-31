@@ -312,6 +312,13 @@ where
             let mut tx = Transaction::new(db)?;
 
             let prev_progress = stage_id.get_progress(tx.deref())?;
+            info!(
+                target: "sync::pipeline",
+                stage = %stage_id,
+                prev_progress,
+                self.max_block,
+                "Stage progress."
+            );
 
             let stage_reached_max_block = prev_progress
                 .zip(self.max_block)
@@ -327,6 +334,10 @@ where
                 // We reached the maximum block, so we skip the stage
                 return Ok(ControlFlow::NoProgress { stage_progress: prev_progress })
             }
+
+            // override this
+            // TODO: Progress across stages is a bit whack
+            // let prev_progress = self.max_block.or(prev_progress);
 
             self.listeners
                 .notify(PipelineEvent::Running { stage_id, stage_progress: prev_progress });

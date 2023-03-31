@@ -176,6 +176,7 @@ impl<DB: Database> Stage<DB> for AccountHashingStage {
         // genesis accounts are not in changeset.
         if to_transition - from_transition > 0 || stage_progress == 0 {
             let mut checkpoint = self.get_checkpoint(tx)?;
+            dbg!(&checkpoint);
 
             if checkpoint.address.is_none() ||
                 // Checkpoint is no longer valid if the range of transitions changed. 
@@ -199,6 +200,8 @@ impl<DB: Database> Stage<DB> for AccountHashingStage {
                     .take(self.commit_threshold as usize)
                     .map(|res| res.map(|(address, account)| (keccak256(address), account)))
                     .collect::<Result<BTreeMap<_, _>, _>>()?;
+
+                dbg!(hashed_batch.len());
 
                 let mut hashed_account_cursor = tx.cursor_write::<tables::HashedAccount>()?;
 

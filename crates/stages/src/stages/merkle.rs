@@ -137,6 +137,8 @@ impl<DB: Database> Stage<DB> for MerkleStage {
             }
         };
 
+        dbg!(trie_root, previous_stage_progress);
+
         if block_root != trie_root {
             warn!(target: "sync::stages::merkle::exec", ?previous_stage_progress, got = ?trie_root, expected = ?block_root, "Block's root state failed verification");
             return Err(StageError::Validation {
@@ -260,6 +262,40 @@ mod tests {
             Ok(ExecOutput { done, stage_progress })
                 if done && stage_progress == previous_stage
         );
+
+        // Validate the stage execution
+        assert!(runner.validate_execution(input, result.ok()).is_ok(), "execution validation");
+    }
+
+    /// Execute from genesis so as to merkelize whole state
+    #[tokio::test]
+    async fn execute_clean_merkle2() {
+        let (previous_stage, stage_progress) = (5000, 0);
+
+        // Set up the runner
+        let mut runner = MerkleTestRunner::default();
+        // set low threshold so we hash the whole storage
+        let input = ExecInput {
+            previous_stage: Some((PREV_STAGE_ID, previous_stage)),
+            stage_progress: Some(stage_progress),
+        };
+
+        runner.seed_execution(input).expect("failed to seed execution");
+
+        let rx = runner.execute(input);
+
+        // Assert the successful result
+        let result = rx.await.unwrap();
+        assert_matches!(
+            result,
+            Ok(ExecOutput { done, stage_progress })
+                if done && stage_progress == previous_stage
+        );
+
+        let mut tx = runner.tx.inner();
+        let root = StateRoot::new(tx.deref_mut()).root().await.unwrap();
+        dbg!(root);
+        drop(tx);
 
         // Validate the stage execution
         assert!(runner.validate_execution(input, result.ok()).is_ok(), "execution validation");
@@ -512,6 +548,7 @@ mod tests {
                     .calculate_root()
                     .and_then(|e| e.root())
                     .unwrap();
+                dbg!(&block_root, &root);
                 assert_eq!(block_root, root);
             }
             Ok(())
