@@ -486,7 +486,7 @@ mod tests {
     fn arbitrary_root() {
         proptest!(|(state: BTreeMap<Vec<u8>, Vec<u8>>)| {
             // filter non-nibbled keys
-            let state = state.into_iter().filter(|(k, _)| k.len() > 1).collect::<BTreeMap<_, _>>();
+            let state = state.into_iter().filter(|(k, _)| !k.is_empty() && k.len() % 2 == 0).collect::<BTreeMap<_, _>>();
             assert_trie_root(state.into_iter());
         });
     }
