@@ -2,6 +2,7 @@ use crate::{
     table::{Compress, Decompress},
     Error,
 };
+use bytes::BufMut;
 use parity_scale_codec::decode_from_bytes;
 use reth_primitives::*;
 
@@ -18,8 +19,9 @@ where
 {
     type Compressed = Vec<u8>;
 
-    fn compress(self) -> Self::Compressed {
-        parity_scale_codec::Encode::encode(&self)
+    fn compress_to_buf<W: BufMut>(self, buf: &mut W) {
+        let mut writer = buf.writer();
+        parity_scale_codec::Encode::encode_to(&self, &mut writer);
     }
 }
 

@@ -3,6 +3,7 @@ use crate::{
     transaction::{DbTx, DbTxMut},
     Error,
 };
+use bytes::BufMut;
 use reth_primitives::bytes::Bytes;
 use serde::Serialize;
 use std::{
@@ -13,10 +14,17 @@ use std::{
 /// Trait that will transform the data to be saved in the DB in a (ideally) compressed format
 pub trait Compress: Send + Sync + Sized + Debug {
     /// Compressed type.
-    type Compressed: AsRef<[u8]> + Send + Sync;
+    type Compressed: BufMut + AsRef<[u8]> + Send + Sync + Default;
 
     /// Compresses data going into the database.
-    fn compress(self) -> Self::Compressed;
+    fn compress(self) -> Self::Compressed {
+        let mut buf = Self::Compressed::default();
+        self.compress_to_buf(&mut buf);
+        buf
+    }
+
+    /// Compresses data going into the database.
+    fn compress_to_buf<W: BufMut>(self, buf: &mut W);
 }
 
 /// Trait that will transform the data to be read from the DB.

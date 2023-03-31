@@ -3,7 +3,7 @@ use serde::{
     de::{Unexpected, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
 };
-use std::ops::Deref;
+use std::{io::Write, ops::Deref};
 use sucds::{EliasFano, Searial};
 
 /// Uses EliasFano to hold a list of integers. It provides really good compression with the
@@ -33,6 +33,11 @@ impl IntegerList {
         let mut vec = Vec::with_capacity(self.0.size_in_bytes());
         self.0.serialize_into(&mut vec).expect("not able to encode integer list.");
         vec
+    }
+
+    /// Serializes a [`IntegerList`] into a sequence of bytes.
+    pub fn to_mut_bytes<W: Write>(&self, buf: W) {
+        self.0.serialize_into(buf).expect("not able to encode integer list.");
     }
 
     /// Deserializes a sequence of bytes into a proper [`IntegerList`].

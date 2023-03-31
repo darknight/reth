@@ -4,6 +4,7 @@ use crate::{
     table::{Compress, Decompress},
     Error,
 };
+use bytes::BufMut;
 use reth_primitives::{bytes::Bytes, IntegerList};
 
 impl Compress for IntegerList {
@@ -11,6 +12,11 @@ impl Compress for IntegerList {
 
     fn compress(self) -> Self::Compressed {
         self.to_bytes()
+    }
+
+    fn compress_to_buf<W: BufMut>(self, buf: &mut W) {
+        let mut writer = buf.writer();
+        self.to_mut_bytes(writer);
     }
 }
 

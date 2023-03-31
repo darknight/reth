@@ -3,8 +3,10 @@ use crate::{
     tables::models::*,
     Error,
 };
+use bytes::BufMut;
 use reth_codecs::{main_codec, Compact};
 use reth_primitives::*;
+use std::io::Write;
 
 /// Implements compression for Compact type.
 macro_rules! impl_compression_for_compact {
@@ -14,10 +16,8 @@ macro_rules! impl_compression_for_compact {
             {
                 type Compressed = Vec<u8>;
 
-                fn compress(self) -> Self::Compressed {
-                    let mut buf = vec![];
-                    let _  = Compact::to_compact(self, &mut buf);
-                    buf
+                fn compress_to_buf<W: BufMut>(self, buf: &mut W){
+                    Compact::to_compact(self, buf);
                 }
             }
 
