@@ -132,23 +132,16 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
                     }
                 }
 
-                // TODO: fix this
-                // let storage_root =
-                //     self.calculate_storage_root(address.as_bytes(), storage_changes)?;
-                let storage_root = if account.has_bytecode() {
-                    StorageRoot::new_hashed(
-                        self.tx,
-                        hashed_address,
-                        self.branch_node_update_sender.clone(),
-                    )
-                    .with_storage_changes(
-                        self.storage_changes.get(&hashed_address).cloned().unwrap_or_default(),
-                    )
-                    .root()
-                    .await?
-                } else {
-                    EMPTY_ROOT
-                };
+                let storage_root = StorageRoot::new_hashed(
+                    self.tx,
+                    hashed_address,
+                    self.branch_node_update_sender.clone(),
+                )
+                .with_storage_changes(
+                    self.storage_changes.get(&hashed_address).cloned().unwrap_or_default(),
+                )
+                .root()
+                .await?;
 
                 let account = EthAccount::from(account).with_storage_root(storage_root);
                 let mut account_rlp = Vec::with_capacity(account.length());
@@ -224,6 +217,7 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StorageRoot<'a, TX> {
         tracing::debug!(target: "loader", hashed_address = ?self.hashed_address, "calculating storage root");
 
         let mut hashed_storage_cursor = self.tx.cursor_dup_read::<tables::HashedStorage>()?;
+
         let mut trie_cursor = StorageTrieCursor::new(
             self.tx.cursor_dup_write::<tables::StoragesTrie2>()?,
             self.hashed_address,
@@ -236,9 +230,13 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StorageRoot<'a, TX> {
 
         while let Some(key) = walker.key() {
             if walker.can_skip_state {
+                // do not add a branch node on empty storage
+                if hashed_storage_cursor.seek_exact(self.hashed_address)?.is_none() {
+                    return Ok(EMPTY_ROOT)
+                }
                 hash_builder.add_branch_from_db(
                     Nibbles::unpack(key),
-                    walker.hash().clone().unwrap(),
+                    walker.hash().unwrap(),
                     walker.children_are_in_trie(),
                 );
             }
@@ -370,8 +368,7 @@ mod tests {
         S: IntoIterator<Item = (H256, U256)>,
     {
         let encoded_accounts = accounts.into_iter().filter_map(|(address, (account, storage))| {
-            let storage_root =
-                if account.has_bytecode() { storage_root(storage.into_iter()) } else { EMPTY_ROOT };
+            let storage_root = storage_root(storage.into_iter());
             let mut out = Vec::new();
             EthAccount::from(account).with_storage_root(storage_root).encode(&mut out);
             Some((address, out))
@@ -421,6 +418,13 @@ mod tests {
     // This ensures we dont add empty accounts to the trie
     async fn test_empty_account() {
         let state: State = BTreeMap::from([
+            (
+                Address::random(),
+                (
+                    Account { nonce: 0, balance: U256::from(0), bytecode_hash: None },
+                    BTreeMap::from([(H256::from_low_u64_be(0x4), U256::from(12))]),
+                ),
+            ),
             (
                 Address::random(),
                 (
@@ -546,7 +550,7 @@ mod tests {
     #[tokio::test]
     async fn sepolia_repro() {
         let path = PathBuf::from_str(
-            "/Users/georgios/paradigm/reth/trie-debugging/sepolia-db-2320000-master",
+            "/Users/georgios/paradigm/reth/trie-debugging/failing-repro-at-2321183",
         )
         .unwrap();
         use reth_db::mdbx::{Env, WriteMap};
