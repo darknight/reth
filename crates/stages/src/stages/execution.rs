@@ -92,6 +92,13 @@ pub struct ExecutionStage<EF: ExecutorFactory> {
     execution_cache: Arc<Mutex<ExecutionCache>>,
 }
 
+// TODO: Move
+// according to w-tinylfu paper, 8c samples = 4 bits overhead per entry
+static ACCOUNT_CACHE_SIZE: usize = 1024 * 512; // 524288 * (address 160 bits + nonce 64 bits + bytecode hash 256 bits + balance 256 bits + overhead
+                                               // 4 bits) = 48 megabyte max
+static STORAGE_CACHE_SIZE: usize = 1024 * 128; // 131072, assume 12 slots (512 bits) + address (160 bits) + overhead (4 bits) = 103 megabyte max
+static BYTECODE_CACHE_SIZE: usize = 1024 * 16; // 16384 (* 24 kb + 4 bits = 49 megabyte max)
+
 impl<EF: ExecutorFactory> ExecutionStage<EF> {
     /// Create new execution stage with specified config.
     pub fn new(executor_factory: EF, commit_threshold: u64) -> Self {
@@ -100,7 +107,11 @@ impl<EF: ExecutorFactory> ExecutionStage<EF> {
             executor_factory,
             commit_threshold,
             // TODO: Figure out nice size
-            execution_cache: Arc::new(Mutex::new(ExecutionCache::new(1024 * 128, 1024 * 64))),
+            execution_cache: Arc::new(Mutex::new(ExecutionCache::new(
+                ACCOUNT_CACHE_SIZE,
+                STORAGE_CACHE_SIZE,
+                BYTECODE_CACHE_SIZE,
+            ))),
         }
     }
 
@@ -164,22 +175,22 @@ impl<EF: ExecutorFactory> ExecutionStage<EF> {
                     .mgas_processed_total
                     .increment(last_receipt.cumulative_gas_used / 1_000_000);
             }
+            {
+                trace!(target: "sync::stages::execution", "Updating cache");
+                let mut cache =
+                    self.execution_cache.lock().expect("Could not lock execution cache");
+                cache.update_cache(block_state.accounts(), block_state.storage());
+                self.metrics.account_cache_hits.absolute(cache.account_hits);
+                self.metrics.account_cache_misses.absolute(cache.account_misses);
+                self.metrics.account_cache_evictions.absolute(cache.account_evictions);
+                self.metrics.storage_cache_hits.absolute(cache.storage_hits);
+                self.metrics.storage_cache_misses.absolute(cache.storage_misses);
+                self.metrics.storage_cache_evictions.absolute(cache.storage_evictions);
+                self.metrics.bytecode_cache_hits.absolute(cache.bytecode_hits);
+                self.metrics.bytecode_cache_misses.absolute(cache.bytecode_misses);
+                self.metrics.bytecode_cache_evictions.absolute(cache.bytecode_evictions);
+            }
             state.extend(block_state);
-        }
-
-        {
-            trace!(target: "sync::stages::execution", "Updating cache");
-            let mut cache = self.execution_cache.lock().expect("Could not lock execution cache");
-            cache.update_cache(state.accounts(), state.storage());
-            self.metrics.account_cache_hits.absolute(cache.account_hits);
-            self.metrics.account_cache_misses.absolute(cache.account_misses);
-            self.metrics.account_cache_evictions.absolute(cache.account_evictions);
-            self.metrics.storage_cache_hits.absolute(cache.storage_hits);
-            self.metrics.storage_cache_misses.absolute(cache.storage_misses);
-            self.metrics.storage_cache_evictions.absolute(cache.storage_evictions);
-            self.metrics.bytecode_cache_hits.absolute(cache.bytecode_hits);
-            self.metrics.bytecode_cache_misses.absolute(cache.bytecode_misses);
-            self.metrics.bytecode_cache_evictions.absolute(cache.bytecode_evictions);
         }
 
         // put execution results to database

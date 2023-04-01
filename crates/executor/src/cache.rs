@@ -65,10 +65,14 @@ pub struct ExecutionCache {
 impl ExecutionCache {
     // TODO: On sample sizes/cache mechanism: https://9vx.org/post/on-window-tinylfu/
     // TODO: https://news.ycombinator.com/item?id=26452890
-    pub fn new(account_cache_size: usize, bytecode_cache_size: usize) -> Self {
+    pub fn new(
+        account_cache_size: usize,
+        storage_cache_size: usize,
+        bytecode_cache_size: usize,
+    ) -> Self {
         Self {
             account_cache: WTinyLfuCache::new(account_cache_size, account_cache_size * 16),
-            storage_cache: WTinyLfuCache::new(account_cache_size, account_cache_size * 16),
+            storage_cache: WTinyLfuCache::new(storage_cache_size, account_cache_size * 16),
             bytecode_cache: WTinyLfuCache::new(bytecode_cache_size, bytecode_cache_size * 8),
             account_hits: 0,
             account_misses: 0,
