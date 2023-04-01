@@ -22,7 +22,9 @@ use reth_db::{
     transaction::{DbTx, DbTxMut},
     Error as DbError,
 };
-use reth_primitives::{keccak256, proofs::EMPTY_ROOT, Address, StorageEntry, TransitionId, H256};
+use reth_primitives::{
+    keccak256, proofs::EMPTY_ROOT, Address, BlockNumber, StorageEntry, TransitionId, H256,
+};
 use reth_rlp::Encodable;
 use thiserror::Error;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
@@ -147,6 +149,21 @@ pub enum StateRootError {
 }
 
 impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
+    pub async fn incremental_root(
+        tx: &'a TX,
+        tid_range: Range<TransitionId>,
+    ) -> Result<H256, StateRootError> {
+        let (account_prefixes, storage_prefixes) = gather_changes(tx, tid_range)?;
+
+        let this = Self::new(tx)
+            .with_account_changes(account_prefixes)
+            .with_storage_changes(storage_prefixes);
+
+        let root = this.root(None).await?;
+
+        Ok(root)
+    }
+
     /// Walks the entire hashed storage table entry for the given address and calculates the storage
     /// root
     pub async fn root(
@@ -209,6 +226,13 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
                     }
                 }
 
+                // We assume we can always calculate a storage root without
+                // OOMing. This opens us up to a potential DOS vector if
+                // a contract had too many storage entries and they were
+                // all buffered w/o us returning and committing our intermeditate
+                // progress.
+                // TODO: We can consider introducing the TrieProgress::Progress/Complete
+                // abstraction inside StorageRoot, but let's give it a try as-is for now.
                 let storage_root =
                     StorageRoot::new_hashed(self.tx, hashed_address, Some(sender.clone()))
                         .with_storage_changes(
@@ -378,7 +402,7 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StorageRoot<'a, TX> {
 fn gather_changes<'a, TX>(
     tx: &TX,
     tid_range: Range<TransitionId>,
-) -> Result<(PrefixSet, HashMap<H256, PrefixSet>), reth_interfaces::Error>
+) -> Result<(PrefixSet, HashMap<H256, PrefixSet>), DbError>
 where
     TX: DbTx<'a>,
 {

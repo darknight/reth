@@ -110,23 +110,20 @@ impl<DB: Database> Stage<DB> for MerkleStage {
         let trie_root = if from_transition == to_transition {
             block_root
         } else {
-            let res = if to_transition - from_transition > 0 || stage_progress == 0 {
+            let res = if to_transition - from_transition > threshold || stage_progress == 0 {
                 debug!(target: "sync::stages::merkle::exec", current = ?stage_progress, target = ?previous_stage_progress, "Rebuilding trie");
                 // if there are more blocks than threshold it is faster to rebuild the trie
                 let loader = StateRoot::new(tx.deref_mut());
                 let root = loader.root(None).await.map_err(|e| StageError::Fatal(Box::new(e)))?;
                 TrieProgress::Complete(root)
             } else {
-                // TODO: Replace this with incremental hash calculation
-                unimplemented!("Incremental trie building is not implemented yet");
-                // debug!(target: "sync::stages::merkle::exec", current = ?stage_progress, target =
-                // ?previous_stage_progress, "Updating trie"); // Iterate over
-                // changeset (similar to Hashing stages) and take new values
-                // let current_root = tx.get_header(stage_progress)?.state_root;
-                // let mut loader = DBTrieLoader::new(tx.deref_mut());
-                // loader
-                //     .update_root(current_root, from_transition..to_transition)
-                //     .map_err(|e| StageError::Fatal(Box::new(e)))?
+                debug!(target: "sync::stages::merkle::exec", current = ?stage_progress, target =
+                ?previous_stage_progress, "Updating trie"); // Iterate over
+                let root =
+                    StateRoot::incremental_root(tx.deref_mut(), from_transition..to_transition)
+                        .await
+                        .map_err(|e| StageError::Fatal(Box::new(e)))?;
+                TrieProgress::Complete(root)
             };
 
             match res {
