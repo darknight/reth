@@ -41,7 +41,7 @@ impl Compact for StorageEntry {
 }
 
 #[main_codec]
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
 /// The nibbles are the keys for the AccountsTrie and the subkeys for the StorageTrie.
 pub struct StoredNibbles {
     /// The inner nibble bytes

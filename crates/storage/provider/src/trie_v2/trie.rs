@@ -16,7 +16,7 @@ use super::{
     prefix_set::PrefixSet,
 };
 use reth_db::{
-    cursor::{DbCursorRO, DbDupCursorRO},
+    cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO},
     models::{AccountBeforeTx, TransitionIdAddress},
     tables,
     transaction::{DbTx, DbTxMut},
@@ -35,25 +35,95 @@ pub enum BranchNodeUpdate {
     Storage(H256, Nibbles, BranchNodeCompact),
 }
 
+#[derive(Debug)]
+/// Collects all the updates to the trie and flushes them to the database in a sorted order.
+struct TrieUpdates<'a, TX> {
+    accounts: BTreeMap<Nibbles, BranchNodeCompact>,
+    storages: BTreeMap<H256, BTreeMap<Nibbles, BranchNodeCompact>>,
+    threshold: usize,
+    count: usize,
+    tx: &'a TX,
+}
+
+use std::collections::BTreeMap;
+
+impl<'a, 'tx, TX> TrieUpdates<'a, TX>
+where
+    TX: DbTxMut<'tx> + DbTx<'tx>,
+{
+    fn new(tx: &'a TX) -> Self {
+        Self { tx, accounts: BTreeMap::new(), storages: BTreeMap::new(), threshold: 100, count: 0 }
+    }
+
+    fn with_threshold(mut self, threshold: usize) -> Self {
+        self.threshold = threshold;
+        self
+    }
+
+    /// Adds an account update to the trie.
+    fn add_account(&mut self, nibbles: Nibbles, branch_node: BranchNodeCompact) {
+        self.accounts.insert(nibbles, branch_node);
+        self.count += 1;
+
+        if self.count == self.threshold {
+            self.flush_to_db();
+        }
+    }
+
+    fn add_storage(&mut self, address: H256, nibbles: Nibbles, branch_node: BranchNodeCompact) {
+        self.storages.entry(address).or_insert_with(BTreeMap::new).insert(nibbles, branch_node);
+        self.count += 1;
+
+        if self.count == self.threshold {
+            self.flush_to_db();
+        }
+    }
+
+    fn flush_to_db(&mut self) -> Result<(), StateRootError> {
+        let mut account_cursor = self.tx.cursor_write::<tables::AccountsTrie2>()?;
+        let mut storage_cursor = self.tx.cursor_dup_write::<tables::StoragesTrie2>()?;
+
+        for (nibbles, branch_node) in std::mem::take(&mut self.accounts) {
+            account_cursor.insert(nibbles.hex_data.into(), branch_node.marshal())?;
+        }
+
+        for (hashed_address, storage) in std::mem::take(&mut self.storages) {
+            for (nibbles, branch_node) in storage {
+                storage_cursor.upsert(
+                    hashed_address,
+                    reth_primitives::StorageTrieEntry2 {
+                        nibbles: nibbles.hex_data.into(),
+                        node: branch_node.marshal(),
+                    },
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 pub struct StateRoot<'a, TX> {
     pub tx: &'a TX,
-    pub branch_node_update_sender: Option<BranchNodeUpdateSender>,
     pub account_changes: PrefixSet,
     pub storage_changes: HashMap<H256, PrefixSet>,
+    pub flush_db_threshold: usize,
 }
 
 impl<'a, TX> StateRoot<'a, TX> {
     pub fn new(tx: &'a TX) -> Self {
         Self {
             tx,
-            branch_node_update_sender: None,
             account_changes: PrefixSet::default(),
             storage_changes: HashMap::default(),
+            // TODO: What should this be? How many trie updates do we want to keep in memory
+            // before flushing to the database?
+            flush_db_threshold: 1000,
         }
     }
 
-    pub fn with_branch_node_update_sender(mut self, sender: BranchNodeUpdateSender) -> Self {
-        self.branch_node_update_sender = Some(sender);
+    pub fn with_flush_db_threshold(mut self, threshold: usize) -> Self {
+        self.flush_db_threshold = threshold;
         self
     }
 
@@ -79,15 +149,22 @@ pub enum StateRootError {
 impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
     /// Walks the entire hashed storage table entry for the given address and calculates the storage
     /// root
-    pub async fn root(&self) -> Result<H256, StateRootError> {
+    pub async fn root(
+        &self,
+        branch_node_sender: Option<BranchNodeUpdateSender>,
+    ) -> Result<H256, StateRootError> {
         tracing::debug!(target: "loader", "calculating state root");
 
-        dbg!("OK");
+        let (sender, maybe_receiver) = match branch_node_sender {
+            Some(sender) => (sender, None),
+            None => {
+                let (sender, recv) = unbounded_channel();
+                (sender, Some(recv))
+            }
+        };
 
         let mut hashed_account_cursor = self.tx.cursor_read::<tables::HashedAccount>()?;
-        dbg!("OK");
         let mut trie_cursor = AccountTrieCursor(self.tx.cursor_write::<tables::AccountsTrie2>()?);
-        dbg!("OK");
         let mut walker = TrieWalker::new(&mut trie_cursor, self.account_changes.clone());
 
         let (account_branch_node_tx, mut account_branch_node_rx) = unbounded_channel();
@@ -132,16 +209,13 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
                     }
                 }
 
-                let storage_root = StorageRoot::new_hashed(
-                    self.tx,
-                    hashed_address,
-                    self.branch_node_update_sender.clone(),
-                )
-                .with_storage_changes(
-                    self.storage_changes.get(&hashed_address).cloned().unwrap_or_default(),
-                )
-                .root()
-                .await?;
+                let storage_root =
+                    StorageRoot::new_hashed(self.tx, hashed_address, Some(sender.clone()))
+                        .with_storage_changes(
+                            self.storage_changes.get(&hashed_address).cloned().unwrap_or_default(),
+                        )
+                        .root()
+                        .await?;
 
                 let account = EthAccount::from(account).with_storage_root(storage_root);
                 let mut account_rlp = Vec::with_capacity(account.length());
@@ -156,10 +230,26 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
         let root = hash_builder.root();
         drop(hash_builder);
 
-        if let Some(sender) = &self.branch_node_update_sender {
-            while let Some((nibbles, branch_node)) = account_branch_node_rx.recv().await {
-                let _ = sender.send(BranchNodeUpdate::Account(nibbles, branch_node));
+        while let Some((nibbles, branch_node)) = account_branch_node_rx.recv().await {
+            let _ = sender.send(BranchNodeUpdate::Account(nibbles, branch_node));
+        }
+        drop(sender);
+
+        if let Some(mut receiver) = maybe_receiver {
+            let mut updates = TrieUpdates::new(self.tx).with_threshold(self.flush_db_threshold);
+            while let Some(update) = receiver.recv().await {
+                match update {
+                    BranchNodeUpdate::Account(nibbles, branch_node) => {
+                        updates.add_account(nibbles, branch_node);
+                    }
+                    BranchNodeUpdate::Storage(hashed_address, nibbles, branch_node) => {
+                        updates.add_storage(hashed_address, nibbles, branch_node);
+                    }
+                }
             }
+
+            // flush once more to make sure that any leftover updates are also written
+            updates.flush_to_db()?;
         }
 
         Ok(root)
@@ -326,6 +416,7 @@ mod tests {
     use super::*;
     use crate::{
         trie::{DBTrieLoader, TrieProgress},
+        trie_v2::account,
         Transaction,
     };
     use proptest::{prelude::ProptestConfig, proptest};
@@ -533,7 +624,7 @@ mod tests {
         tx.commit().unwrap();
         let expected = state_root(state.into_iter());
 
-        let got = StateRoot::new(tx.deref_mut()).root().await.unwrap();
+        let got = StateRoot::new(tx.deref_mut()).root(None).await.unwrap();
         assert_eq!(expected, got);
     }
 
@@ -718,8 +809,8 @@ mod tests {
 
         // Check state root calculation from scratch
         let (branch_node_tx, branch_node_rx) = mpsc::unbounded_channel();
-        let loader = StateRoot::new(tx.deref()).with_branch_node_update_sender(branch_node_tx);
-        assert_eq!(loader.root().await.unwrap(), computed_expected_root);
+        let loader = StateRoot::new(tx.deref());
+        assert_eq!(loader.root(Some(branch_node_tx)).await.unwrap(), computed_expected_root);
 
         // Check account trie
         drop(loader);
@@ -793,10 +884,8 @@ mod tests {
                 .unwrap();
 
         let (branch_node_tx, branch_node_rx) = mpsc::unbounded_channel();
-        let loader = StateRoot::new(tx.deref())
-            .with_branch_node_update_sender(branch_node_tx)
-            .with_account_changes(prefix_set);
-        assert_eq!(loader.root().await.unwrap(), expected_state_root);
+        let loader = StateRoot::new(tx.deref()).with_account_changes(prefix_set);
+        assert_eq!(loader.root(Some(branch_node_tx)).await.unwrap(), expected_state_root);
 
         drop(loader);
         let branch_node_stream = UnboundedReceiverStream::new(branch_node_rx);
@@ -902,6 +991,67 @@ mod tests {
         let db = create_test_rw_db();
         let mut tx = Transaction::new(db.as_ref()).unwrap();
 
+        let expected = extension_node_trie(&mut tx);
+
+        let (sender, recv) = mpsc::unbounded_channel();
+        let loader = StateRoot::new(tx.deref_mut());
+        let got = loader.root(Some(sender)).await.unwrap();
+        assert_eq!(expected, got);
+
+        // Check account trie
+        drop(loader);
+        let branch_node_stream = UnboundedReceiverStream::new(recv);
+        let updates = branch_node_stream.collect::<Vec<_>>().await;
+
+        let account_updates = updates
+            .into_iter()
+            .filter_map(|u| {
+                if let BranchNodeUpdate::Account(nibbles, node) = u {
+                    Some((nibbles, node))
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        assert_account_updates(&account_updates);
+    }
+
+    #[tokio::test]
+
+    async fn account_trie_around_extension_node_with_dbtrie() {
+        let db = create_test_rw_db();
+        let mut tx = Transaction::new(db.as_ref()).unwrap();
+
+        let expected = extension_node_trie(&mut tx);
+
+        let loader = StateRoot::new(tx.deref_mut());
+        let got = loader.root(None).await.unwrap();
+        assert_eq!(expected, got);
+
+        drop(loader);
+
+        // read the account updates from the db
+        let mut accounts_trie = tx.cursor_read::<tables::AccountsTrie2>().unwrap();
+        let mut walker = accounts_trie.walk(None).unwrap();
+        let mut account_updates = BTreeMap::new();
+        while let Some(item) = walker.next() {
+            let item = item.unwrap();
+            account_updates.insert(
+                Nibbles::from(item.0.inner.0.as_ref()),
+                BranchNodeCompact::unmarshal(&item.1).unwrap(),
+            );
+        }
+
+        assert_account_updates(&account_updates);
+    }
+
+    use reth_db::mdbx::{Env, WriteMap};
+
+    fn extension_node_trie(tx: &mut Transaction<'_, Env<WriteMap>>) -> H256 {
+        let mut hashed_accounts = tx.cursor_write::<tables::HashedAccount>().unwrap();
+        let mut hb = HashBuilder::new(None);
+
         let a = Account {
             nonce: 0,
             balance: U256::from(1u64),
@@ -926,33 +1076,15 @@ mod tests {
             hb.add_leaf(Nibbles::unpack(&key), &val);
         }
 
-        let expected = hb.root();
-        let (sender, recv) = mpsc::unbounded_channel();
-        let loader = StateRoot::new(tx.deref_mut()).with_branch_node_update_sender(sender);
-        let got = loader.root().await.unwrap();
-        assert_eq!(expected, got);
+        hb.root()
+    }
 
-        // Check account trie
-        drop(loader);
-        let branch_node_stream = UnboundedReceiverStream::new(recv);
-        let updates = branch_node_stream.collect::<Vec<_>>().await;
-
-        let account_updates = updates
-            .iter()
-            .filter_map(|u| {
-                if let BranchNodeUpdate::Account(nibbles, node) = u {
-                    Some((nibbles, node))
-                } else {
-                    None
-                }
-            })
-            .collect::<BTreeMap<_, _>>();
-
+    fn assert_account_updates(account_updates: &BTreeMap<Nibbles, BranchNodeCompact>) {
         assert_eq!(account_updates.len(), 2);
 
         let node = account_updates.get(&Nibbles::from(vec![0x3])).unwrap();
         let expected = BranchNodeCompact::new(0b0011, 0b0001, 0b0000, vec![], None);
-        assert_eq!(node, &&expected);
+        assert_eq!(node, &expected);
 
         let node = account_updates.get(&Nibbles::from(vec![0x3, 0x0, 0xA, 0xF])).unwrap();
         assert_eq!(node.state_mask, 0b101100000);

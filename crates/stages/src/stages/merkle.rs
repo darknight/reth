@@ -114,7 +114,7 @@ impl<DB: Database> Stage<DB> for MerkleStage {
                 debug!(target: "sync::stages::merkle::exec", current = ?stage_progress, target = ?previous_stage_progress, "Rebuilding trie");
                 // if there are more blocks than threshold it is faster to rebuild the trie
                 let loader = StateRoot::new(tx.deref_mut());
-                let root = loader.root().await.map_err(|e| StageError::Fatal(Box::new(e)))?;
+                let root = loader.root(None).await.map_err(|e| StageError::Fatal(Box::new(e)))?;
                 TrieProgress::Complete(root)
             } else {
                 // TODO: Replace this with incremental hash calculation
