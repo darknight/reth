@@ -1,8 +1,12 @@
+use std::fmt::Debug;
+
 use revm_primitives::Bytes;
 
-#[derive(Clone)]
+use super::nibbles::Nibbles;
+
+#[derive(Debug, Clone)]
 pub struct PrefixSet {
-    keys: Vec<Bytes>,
+    keys: Vec<Nibbles>,
     sorted: bool,
     index: usize,
 }
@@ -18,13 +22,14 @@ impl PrefixSet {
         Self { keys: Vec::new(), sorted: true, index: 0 }
     }
 
-    fn sort(&mut self) {
+    pub fn sort(&mut self) {
         self.keys.sort();
         self.keys.dedup();
         self.sorted = true;
     }
 
-    pub(crate) fn contains(&mut self, prefix: &[u8]) -> bool {
+    pub(crate) fn contains<T: Into<Nibbles>>(&mut self, prefix: T) -> bool {
+        let prefix = prefix.into();
         if self.keys.is_empty() {
             return false
         }
@@ -40,11 +45,11 @@ impl PrefixSet {
         loop {
             let current = &self.keys[self.index];
 
-            if current.starts_with(prefix) {
+            if current.has_prefix(&prefix) {
                 return true
             }
 
-            if current > prefix {
+            if current > &prefix {
                 return false
             }
 
@@ -56,8 +61,8 @@ impl PrefixSet {
         }
     }
 
-    pub fn insert(&mut self, key: &[u8]) {
-        self.keys.push(Bytes::copy_from_slice(key));
+    pub fn insert<T: Into<Nibbles>>(&mut self, nibbles: T) {
+        self.keys.push(nibbles.into());
         self.sorted = false;
     }
 

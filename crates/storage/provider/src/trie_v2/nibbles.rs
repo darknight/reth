@@ -22,6 +22,12 @@ pub struct Nibbles {
     pub hex_data: Vec<u8>,
 }
 
+impl<const N: usize> From<&[u8; N]> for Nibbles {
+    fn from(arr: &[u8; N]) -> Self {
+        Nibbles::from_hex(arr.to_vec())
+    }
+}
+
 impl Debug for Nibbles {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Nibbles").field("hex_data", &hex::encode(&self.hex_data)).finish()
@@ -270,6 +276,10 @@ impl Nibbles {
         }
 
         res
+    }
+
+    pub fn has_prefix(&self, other: &Self) -> bool {
+        self.hex_data.starts_with(&other.hex_data)
     }
 
     pub fn len(&self) -> usize {

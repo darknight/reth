@@ -105,6 +105,8 @@ impl Command {
             }
             StageEnum::Merkle => {
                 tool.db.update(|tx| {
+                    tx.clear::<tables::AccountsTrie2>()?;
+                    tx.clear::<tables::StoragesTrie2>()?;
                     tx.clear::<tables::AccountsTrie>()?;
                     tx.clear::<tables::StoragesTrie>()?;
                     tx.put::<tables::SyncStageProgress>(

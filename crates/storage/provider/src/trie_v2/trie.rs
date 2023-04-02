@@ -81,12 +81,13 @@ where
         }
     }
 
+    #[tracing::instrument(skip_all, fields(count = self.count))]
     fn flush_to_db(&mut self) -> Result<(), StateRootError> {
         let mut account_cursor = self.tx.cursor_write::<tables::AccountsTrie2>()?;
         let mut storage_cursor = self.tx.cursor_dup_write::<tables::StoragesTrie2>()?;
 
         for (nibbles, branch_node) in std::mem::take(&mut self.accounts) {
-            account_cursor.insert(nibbles.hex_data.into(), branch_node.marshal())?;
+            account_cursor.upsert(nibbles.hex_data.into(), branch_node.marshal())?;
         }
 
         for (hashed_address, storage) in std::mem::take(&mut self.storages) {
@@ -153,7 +154,10 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
         tx: &'a TX,
         tid_range: Range<TransitionId>,
     ) -> Result<H256, StateRootError> {
+        tracing::debug!(target: "loader", "incremental state root");
+        dbg!(&tid_range);
         let (account_prefixes, storage_prefixes) = gather_changes(tx, tid_range)?;
+        dbg!(&account_prefixes, &storage_prefixes);
 
         let this = Self::new(tx)
             .with_account_changes(account_prefixes)
@@ -399,6 +403,7 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StorageRoot<'a, TX> {
     }
 }
 
+#[tracing::instrument(skip(tx))]
 fn gather_changes<'a, TX>(
     tx: &TX,
     tid_range: Range<TransitionId>,
@@ -413,8 +418,9 @@ where
 
     let mut walker = account_cursor.walk_range(tid_range.clone())?;
 
-    while let Some((_, AccountBeforeTx { address, .. })) = walker.next().transpose()? {
-        account_prefix_set.insert(Nibbles::unpack(keccak256(address)).get_data());
+    while let Some((key, AccountBeforeTx { address, info })) = walker.next().transpose()? {
+        tracing::debug!(target: "loader", tid = ?key, address = ?address, prestate = ?info, "account change");
+        account_prefix_set.insert(Nibbles::unpack(keccak256(address)));
     }
 
     let mut storage_cursor = tx.cursor_dup_read::<tables::StorageChangeSet>()?;
@@ -429,7 +435,13 @@ where
         storage_prefix_set
             .entry(keccak256(address))
             .or_default()
-            .insert(Nibbles::unpack(keccak256(key)).get_data());
+            .insert(Nibbles::unpack(keccak256(key)));
+        account_prefix_set.insert(Nibbles::unpack(keccak256(address)));
+    }
+
+    account_prefix_set.sort();
+    for (_, storage_prefix_set) in storage_prefix_set.iter_mut() {
+        storage_prefix_set.sort();
     }
 
     Ok((account_prefix_set, storage_prefix_set))
@@ -458,6 +470,7 @@ mod tests {
     };
     use tokio::sync::mpsc;
     use tokio_stream::{wrappers::UnboundedReceiverStream, StreamExt};
+    use tracing::Level;
 
     fn insert_account<'a, TX: DbTxMut<'a>>(
         tx: &mut TX,
