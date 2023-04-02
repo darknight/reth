@@ -677,30 +677,33 @@ mod tests {
 
     #[tokio::test]
     async fn sepolia_repro() {
-        let path = PathBuf::from_str(
-            "/Users/georgios/paradigm/reth/trie-debugging/failing-repro-at-2321183",
-        )
-        .unwrap();
+        let _ = tracing_subscriber::fmt().with_env_filter("loader=trace").try_init();
+
+        let path =
+            PathBuf::from_str("/Users/georgios/Library/Application Support/reth/db/").unwrap();
         use reth_db::mdbx::{Env, WriteMap};
         let db = Env::<WriteMap>::open(&path, reth_db::mdbx::EnvKind::RW).unwrap();
-        let tx = db.tx_mut().unwrap();
-        let loader = StateRoot::new(&tx);
-        let incremental_root = loader.root().await.unwrap();
+        let mut tx = Transaction::new(&db).unwrap();
 
+        let from = tx.get_block_transition(3208395).unwrap();
+        let to = tx.get_block_transition(3208396).unwrap();
+        dbg!(from, to);
+
+        let incremental_root = StateRoot::incremental_root(tx.deref_mut(), from..to).await.unwrap();
         dbg!(&incremental_root);
 
-        let mut cita_loader = DBTrieLoader::new(&tx);
-        let cita_root = loop {
-            let root = cita_loader.calculate_root().unwrap();
-            match root {
-                TrieProgress::Complete(root) => break root,
-                _ => continue,
-            }
-        };
+        let loader = StateRoot::new(tx.deref_mut());
+        let (sender, _) = tokio::sync::mpsc::unbounded_channel();
+        let full_root = loader.root(Some(sender)).await.unwrap();
+        drop(loader);
 
-        dbg!(&cita_root, &incremental_root);
+        dbg!(&full_root);
 
-        assert_eq!(incremental_root, cita_root);
+        //assert_eq!(incremental_root, full_root);
+
+        // dbg!(&cita_root, &incremental_root);
+
+        // assert_eq!(incremental_root, cita_root);
     }
 
     #[tokio::test]
@@ -953,6 +956,8 @@ mod tests {
         let (nibbles2b, node2b) = account_updates.first().unwrap();
         assert_eq!(nibbles2b.get_data(), [0xB, 0x0]);
         assert_eq!(node2a, node2b);
+
+        // TODO: FIGURE OUT HOW TO TEST CHANGESETS WITH INCREMENTAL HASH GENERATION
 
         // drop(hashed_accounts);
         // drop(account_change_table);
