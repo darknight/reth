@@ -506,14 +506,14 @@ mod tests {
             // Trie:
             // root
             // - leaf1
-            (hex!("636172").to_vec(), Vec::new()),
+            "636172",
             // Value: cat
             // Trie:
             // root
             // - branch1: ca
             //  - leaf1: car
             //  - leaf2: cat
-            (hex!("636174").to_vec(), Vec::new()),
+            "636174",
             // Value: do
             // Trie:
             // root
@@ -521,7 +521,7 @@ mod tests {
             //  - leaf1: car
             //  - leaf2: cat
             // - leaf3: do
-            (hex!("646f").to_vec(), Vec::new()),
+            "646f",
             // Value: dog
             // Trie:
             // root
@@ -531,7 +531,7 @@ mod tests {
             // - branch2: do
             //  - leaf3: do
             //  - leaf4: dog
-            (hex!("646f67").to_vec(), Vec::new()),
+            "646f67",
             // Value: do
             // Trie:
             // root
@@ -543,16 +543,25 @@ mod tests {
             //  - branch3: dog
             //   - leaf4: dog
             //   - leaf5: dogs
-            (hex!("646f6773").to_vec(), Vec::new()),
+            "646f6773",
         ];
-        data.iter().for_each(|(key, val)| {
+        data.iter().for_each(|key| {
+            let mut key = hex::decode(key).unwrap();
+            key.resize(32, 0);
             let nibbles = Nibbles::unpack(key);
-            hb.add_leaf(nibbles, val.as_ref());
+            hb.add_leaf(nibbles, &[]);
         });
         let root = hb.root();
         drop(hb);
 
-        assert_eq!(root, trie_root(data));
+        assert_eq!(
+            root,
+            trie_root(data.iter().map(|key| {
+                let mut key = hex::decode(key).unwrap();
+                key.resize(32, 0);
+                (key, &[])
+            }))
+        );
     }
     #[test]
     fn test_root_raw_data() {
