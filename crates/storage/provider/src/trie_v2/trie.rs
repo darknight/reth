@@ -153,6 +153,7 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
     pub async fn incremental_root(
         tx: &'a TX,
         tid_range: Range<TransitionId>,
+        branch_node_sender: Option<BranchNodeUpdateSender>,
     ) -> Result<H256, StateRootError> {
         tracing::debug!(target: "loader", "incremental state root");
         dbg!(&tid_range);
@@ -163,7 +164,7 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
             .with_account_changes(account_prefixes)
             .with_storage_changes(storage_prefixes);
 
-        let root = this.root(None).await?;
+        let root = this.root(branch_node_sender).await?;
 
         Ok(root)
     }
@@ -689,7 +690,8 @@ mod tests {
         let to = tx.get_block_transition(3208396).unwrap();
         dbg!(from, to);
 
-        let incremental_root = StateRoot::incremental_root(tx.deref_mut(), from..to).await.unwrap();
+        let incremental_root =
+            StateRoot::incremental_root(tx.deref_mut(), from..to, None).await.unwrap();
         dbg!(&incremental_root);
 
         let loader = StateRoot::new(tx.deref_mut());
@@ -956,76 +958,120 @@ mod tests {
         let (nibbles2b, node2b) = account_updates.first().unwrap();
         assert_eq!(nibbles2b.get_data(), [0xB, 0x0]);
         assert_eq!(node2a, node2b);
+        tx.commit().unwrap();
 
-        // TODO: FIGURE OUT HOW TO TEST CHANGESETS WITH INCREMENTAL HASH GENERATION
+        {
+            let mut hashed_account_cursor = tx.cursor_write::<tables::HashedAccount>().unwrap();
 
-        // drop(hashed_accounts);
-        // drop(account_change_table);
-        // txn.commit().unwrap();
+            let account = hashed_account_cursor.seek_exact(key2).unwrap().unwrap();
+            hashed_account_cursor.delete_current().unwrap();
 
-        // --------------------------
-        // // Delete an account
-        // {
-        //     let txn = db.begin_mutable().unwrap();
-        //     let mut hashed_accounts = txn.cursor(tables::HashedAccount).unwrap();
-        //     let account_trie = txn.cursor(tables::TrieAccount).unwrap();
-        //     let mut account_change_table = txn.cursor(tables::AccountChangeSet).unwrap();
-        //     {
-        //         let account = hashed_accounts.seek_exact(key2).unwrap().unwrap().1;
-        //         hashed_accounts.delete_current().unwrap();
-        //         account_change_table
-        //             .upsert(
-        //                 BlockNumber(2),
-        //                 tables::AccountChange { address: address2, account: Some(account) },
-        //             )
-        //             .unwrap();
-        //     }
+            let mut account_prefix_set = PrefixSet::default();
+            account_prefix_set.insert(Nibbles::unpack(account.0));
 
-        //     increment_intermediate_hashes(&txn, &temp_dir, BlockNumber(1), None).unwrap();
+            let computed_expected_root: H256 = triehash::trie_root::<KeccakHasher, _, _, _>([
+                (key1, encode_account(account1, None)),
+                // DELETED: (key2, encode_account(account2, None)),
+                (key3, encode_account(account3, Some(account3_storage_root))),
+                (key4a, encode_account(account4a, None)),
+                (key4b, encode_account(account4b, None)),
+                (key5, encode_account(account5, None)),
+                (key6, encode_account(account6, None)),
+            ]);
 
-        //     let node_map = read_all_nodes(account_trie);
-        //     assert_eq!(node_map.len(), 1);
+            let (branch_node_tx, branch_node_rx) = mpsc::unbounded_channel();
+            let loader = StateRoot::new(tx.deref_mut()).with_account_changes(account_prefix_set);
+            assert_eq!(loader.root(Some(branch_node_tx)).await.unwrap(), computed_expected_root);
+            drop(loader);
 
-        //     let node1c = &node_map[&vec![0xB]];
-        //     assert_eq!(node1c.state_mask, 0b1011);
-        //     assert_eq!(node1c.tree_mask, 0b0000);
-        //     assert_eq!(node1c.hash_mask, 0b1011);
+            let branch_node_stream = UnboundedReceiverStream::new(branch_node_rx);
+            let updates = branch_node_stream.collect::<Vec<_>>().await;
+            assert_eq!(updates.len(), 2);
 
-        //     assert_eq!(node1c.root_hash, None);
+            let account_updates = updates
+                .iter()
+                .filter_map(|u| {
+                    if let BranchNodeUpdate::Account(nibbles, node) = u {
+                        Some((nibbles, node))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(account_updates.len(), 1);
 
-        //     assert_eq!(node1c.hashes.len(), 3);
-        //     assert_ne!(node1b.hashes[0], node1c.hashes[0]);
-        //     assert_eq!(node1b.hashes[1], node1c.hashes[1]);
-        //     assert_eq!(node1b.hashes[2], node1c.hashes[2]);
-        // }
+            let (nibbles1c, node1c) = account_updates.first().unwrap();
+            assert_eq!(nibbles1c.get_data(), [0xB]);
 
-        // --------------------------
-        // // Delete several accounts
-        // {
-        //     let txn = db.begin_mutable().unwrap();
-        //     let mut hashed_accounts = txn.cursor(tables::HashedAccount).unwrap();
-        //     let account_trie = txn.cursor(tables::TrieAccount).unwrap();
-        //     let mut account_change_table = txn.cursor(tables::AccountChangeSet).unwrap();
-        //     for (key, address) in [(key2, address2), (key3, address3)] {
-        //         let account = hashed_accounts.seek_exact(key).unwrap().unwrap().1;
-        //         hashed_accounts.delete_current().unwrap();
-        //         account_change_table
-        //             .upsert(
-        //                 BlockNumber(2),
-        //                 tables::AccountChange { address, account: Some(account) },
-        //             )
-        //             .unwrap();
-        //     }
+            assert_eq!(node1c.state_mask, 0b1011);
+            assert_eq!(node1c.tree_mask, 0b0000);
+            assert_eq!(node1c.hash_mask, 0b1011);
 
-        //     increment_intermediate_hashes(&txn, &temp_dir, BlockNumber(1), None).unwrap();
+            assert_eq!(node1c.root_hash, None);
 
-        //     assert_eq!(
-        //         read_all_nodes(account_trie),
-        //         hashmap! {
-        //             vec![0xB] => Node::new(0b1011, 0b0000, 0b1010, vec![node1b.hashes[1],
-        // node1b.hashes[2]], None)         }
-        //     );
-        // }
+            assert_eq!(node1c.hashes.len(), 3);
+            assert_ne!(node1c.hashes[0], node1b.hashes[0]);
+            assert_eq!(node1c.hashes[1], node1b.hashes[1]);
+            assert_eq!(node1c.hashes[2], node1b.hashes[2]);
+            tx.drop().unwrap();
+        }
+
+        {
+            let mut hashed_account_cursor = tx.cursor_write::<tables::HashedAccount>().unwrap();
+
+            let account2 = hashed_account_cursor.seek_exact(key2).unwrap().unwrap();
+            hashed_account_cursor.delete_current().unwrap();
+            let account3 = hashed_account_cursor.seek_exact(key3).unwrap().unwrap();
+            hashed_account_cursor.delete_current().unwrap();
+
+            let mut account_prefix_set = PrefixSet::default();
+            account_prefix_set.insert(Nibbles::unpack(account2.0));
+            account_prefix_set.insert(Nibbles::unpack(account3.0));
+
+            let computed_expected_root: H256 = triehash::trie_root::<KeccakHasher, _, _, _>([
+                (key1, encode_account(account1, None)),
+                // DELETED: (key2, encode_account(account2, None)),
+                // DELETED: (key3, encode_account(account3, Some(account3_storage_root))),
+                (key4a, encode_account(account4a, None)),
+                (key4b, encode_account(account4b, None)),
+                (key5, encode_account(account5, None)),
+                (key6, encode_account(account6, None)),
+            ]);
+
+            let (branch_node_tx, branch_node_rx) = mpsc::unbounded_channel();
+            let loader = StateRoot::new(tx.deref_mut()).with_account_changes(account_prefix_set);
+            assert_eq!(loader.root(Some(branch_node_tx)).await.unwrap(), computed_expected_root);
+            drop(loader);
+
+            let branch_node_stream = UnboundedReceiverStream::new(branch_node_rx);
+            let updates = branch_node_stream.collect::<Vec<_>>().await;
+            assert_eq!(updates.len(), 1); // no storage root update
+
+            let account_updates = updates
+                .iter()
+                .filter_map(|u| {
+                    if let BranchNodeUpdate::Account(nibbles, node) = u {
+                        Some((nibbles, node))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(account_updates.len(), 1);
+
+            let (nibbles1d, node1d) = account_updates.first().unwrap();
+            assert_eq!(nibbles1d.get_data(), [0xB]);
+
+            assert_eq!(node1d.state_mask, 0b1011);
+            assert_eq!(node1d.tree_mask, 0b0000);
+            assert_eq!(node1d.hash_mask, 0b1010);
+
+            assert_eq!(node1d.root_hash, None);
+
+            assert_eq!(node1d.hashes.len(), 2);
+            assert_eq!(node1d.hashes[0], node1b.hashes[1]);
+            assert_eq!(node1d.hashes[1], node1b.hashes[2]);
+        }
     }
 
     #[tokio::test]

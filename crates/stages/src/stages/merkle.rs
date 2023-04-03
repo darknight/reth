@@ -119,10 +119,13 @@ impl<DB: Database> Stage<DB> for MerkleStage {
             } else {
                 debug!(target: "sync::stages::merkle::exec", current = ?stage_progress, target =
                 ?previous_stage_progress, "Updating trie"); // Iterate over
-                let root =
-                    StateRoot::incremental_root(tx.deref_mut(), from_transition..to_transition)
-                        .await
-                        .map_err(|e| StageError::Fatal(Box::new(e)))?;
+                let root = StateRoot::incremental_root(
+                    tx.deref_mut(),
+                    from_transition..to_transition,
+                    None,
+                )
+                .await
+                .map_err(|e| StageError::Fatal(Box::new(e)))?;
                 TrieProgress::Complete(root)
             };
 
