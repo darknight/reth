@@ -321,10 +321,12 @@ impl Command {
             let res = beacon_consensus_engine.await;
             let _ = rx.send(res);
         });
-
+        println!("TEST0!");
         tx.await??;
+        println!("TEST1!");
 
         info!(target: "reth::cli", "Consensus engine has exited.");
+        println!("TEST2!");
 
         if self.debug.terminate {
             Ok(())

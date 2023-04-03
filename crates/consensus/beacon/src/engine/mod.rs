@@ -141,6 +141,7 @@ where
         let is_first_forkchoice = self.forkchoice_state.is_none();
         self.forkchoice_state = Some(state);
         let status = if self.is_pipeline_idle() {
+            println!("IS IDLE");
             match self.blockchain_tree.make_canonical(&state.head_block_hash) {
                 Ok(_) => {
                     let head_block_number = self
@@ -178,6 +179,7 @@ where
                 }
             }
         } else {
+            println!("SYNCING");
             PayloadStatus::from_status(PayloadStatusEnum::Syncing)
         };
         trace!(target: "consensus::engine", ?state, ?status, "Returning forkchoice status");
@@ -313,13 +315,14 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-
+        println!("POLL1");
         // Set the next pipeline state.
         loop {
             // Process all incoming messages first.
             while let Poll::Ready(Some(msg)) = this.message_rx.poll_next_unpin(cx) {
                 match msg {
                     BeaconEngineMessage::ForkchoiceUpdated { state, payload_attrs, tx } => {
+                        println!("ForkchoiceUpdated");
                         let response = match this.on_forkchoice_updated(state, payload_attrs) {
                             Ok(response) => response,
                             Err(error) => {
@@ -341,28 +344,33 @@ where
                         }
                     }
                     BeaconEngineMessage::NewPayload { payload, tx } => {
+                        println!("NewPayload");
                         let response = this.on_new_payload(payload);
                         let _ = tx.send(Ok(response));
                     }
                 }
             }
-
+            println!("POLL2");
             // Lookup the forkchoice state. We can't launch the pipeline without the tip.
             let forkchoice_state = match &this.forkchoice_state {
                 Some(state) => *state,
                 None => return Poll::Pending,
             };
+            println!("POLL3");
 
             let next_state = match this.pipeline_state.take().expect("pipeline state is set") {
                 PipelineState::Running(mut fut) => {
+                    println!("PipelineState::Running ");
                     match fut.poll_unpin(cx) {
                         Poll::Ready(Ok((pipeline, result))) => {
+                            print!("Poll::Ready(Ok((pipeline, result)))");
                             if let Err(error) = result {
                                 return Poll::Ready(Err(error.into()))
                             }
 
                             match result {
                                 Ok(ctrl) => {
+                                    println!("Pipeline control: {:?}", ctrl);
                                     if ctrl.is_unwind() {
                                         this.require_pipeline_run(PipelineTarget::Head);
                                     } else {
@@ -395,16 +403,20 @@ where
                             return Poll::Ready(Err(BeaconEngineError::PipelineChannelClosed))
                         }
                         Poll::Pending => {
+                            println!("Pending");
                             this.pipeline_state = Some(PipelineState::Running(fut));
                             return Poll::Pending
                         }
                     }
                 }
                 PipelineState::Idle(pipeline) => {
+                    println!("Idle");
                     this.next_pipeline_state(pipeline, forkchoice_state)
                 }
             };
             this.pipeline_state = Some(next_state);
+
+            println!("next  state");
 
             // If the pipeline is idle, break from the loop.
             if this.is_pipeline_idle() {
