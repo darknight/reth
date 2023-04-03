@@ -1,5 +1,9 @@
 use crate::{ExecInput, ExecOutput, Stage, StageError, StageId, UnwindInput, UnwindOutput};
-use reth_db::{database::Database, tables, transaction::DbTx};
+use reth_db::{
+    database::Database,
+    tables,
+    transaction::{DbTx, DbTxMut},
+};
 use reth_interfaces::consensus;
 use reth_provider::{
     trie::{DBTrieLoader, TrieProgress},
@@ -110,30 +114,17 @@ impl<DB: Database> Stage<DB> for MerkleStage {
         let trie_root = if from_transition == to_transition {
             block_root
         } else {
-            let res = if to_transition - from_transition > threshold || stage_progress == 0 {
+            if to_transition - from_transition > threshold || stage_progress == 0 {
                 debug!(target: "sync::stages::merkle::exec", current = ?stage_progress, target = ?previous_stage_progress, "Rebuilding trie");
                 // if there are more blocks than threshold it is faster to rebuild the trie
                 let loader = StateRoot::new(tx.deref_mut());
-                let root = loader.root(None).await.map_err(|e| StageError::Fatal(Box::new(e)))?;
-                TrieProgress::Complete(root)
+                loader.root(None).await.map_err(|e| StageError::Fatal(Box::new(e)))?
             } else {
                 debug!(target: "sync::stages::merkle::exec", current = ?stage_progress, target =
                 ?previous_stage_progress, "Updating trie"); // Iterate over
-                let root = StateRoot::incremental_root(
-                    tx.deref_mut(),
-                    from_transition..to_transition,
-                    None,
-                )
-                .await
-                .map_err(|e| StageError::Fatal(Box::new(e)))?;
-                TrieProgress::Complete(root)
-            };
-
-            match res {
-                TrieProgress::Complete(root) => root,
-                TrieProgress::InProgress(_) => {
-                    return Ok(ExecOutput { stage_progress, done: false })
-                }
+                StateRoot::incremental_root(tx.deref_mut(), from_transition..to_transition, None)
+                    .await
+                    .map_err(|e| StageError::Fatal(Box::new(e)))?
             }
         };
 

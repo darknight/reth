@@ -265,6 +265,9 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
         drop(sender);
 
         if let Some(mut receiver) = maybe_receiver {
+            tx.clear::<tables::AccountsTrie2>()?;
+            tx.clear::<tables::StoragesTrie2>()?;
+
             let mut updates = TrieUpdates::new(self.tx).with_threshold(self.flush_db_threshold);
             while let Some(update) = receiver.recv().await {
                 match update {
