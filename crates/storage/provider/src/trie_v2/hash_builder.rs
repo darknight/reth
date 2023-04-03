@@ -383,6 +383,8 @@ mod tests {
         collections::{BTreeMap, HashMap},
         str::FromStr,
     };
+    use tokio::sync::mpsc::unbounded_channel;
+    use tokio_stream::{wrappers::UnboundedReceiverStream, StreamExt};
 
     fn trie_root<I, K, V>(iter: I) -> H256
     where
@@ -491,6 +493,67 @@ mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn test_generates_branch_node() {
+        let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).try_init();
+        use hex_literal::hex;
+        let (sender, mut recv) = unbounded_channel();
+        let mut hb = HashBuilder::new(Some(sender));
+
+        let data = vec![
+            // Value: car
+            //
+            // Trie:
+            // root
+            // - leaf1
+            (hex!("636172").to_vec(), Vec::new()),
+            // Value: cat
+            // Trie:
+            // root
+            // - branch1: ca
+            //  - leaf1: car
+            //  - leaf2: cat
+            (hex!("636174").to_vec(), Vec::new()),
+            // Value: do
+            // Trie:
+            // root
+            // - branch1: ca
+            //  - leaf1: car
+            //  - leaf2: cat
+            // - leaf3: do
+            (hex!("646f").to_vec(), Vec::new()),
+            // Value: dog
+            // Trie:
+            // root
+            // - branch1: ca
+            //  - leaf1: car
+            //  - leaf2: cat
+            // - branch2: do
+            //  - leaf3: do
+            //  - leaf4: dog
+            (hex!("646f67").to_vec(), Vec::new()),
+            // Value: do
+            // Trie:
+            // root
+            // - branch1: ca
+            //  - leaf1: car
+            //  - leaf2: cat
+            // - branch2: do
+            //  - leaf3: do
+            //  - branch3: dog
+            //   - leaf4: dog
+            //   - leaf5: dogs
+            (hex!("646f6773").to_vec(), Vec::new()),
+        ];
+        data.iter().for_each(|(key, val)| {
+            let nibbles = Nibbles::unpack(key);
+            hb.add_leaf(nibbles, val.as_ref());
+        });
+        let root = hb.root();
+        drop(hb);
+
+        assert_eq!(root, trie_root(data));
+    }
     #[test]
     fn test_root_raw_data() {
         reth_tracing::init_test_tracing();
