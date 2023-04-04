@@ -500,69 +500,67 @@ mod tests {
         let (sender, mut recv) = unbounded_channel();
         let mut hb = HashBuilder::new(Some(sender));
 
-        let data = vec![
-            // Value: car
-            //
-            // Trie:
-            // root
-            // - leaf1
-            "636172",
-            // Value: cat
-            // Trie:
-            // root
-            // - branch1: ca
-            //  - leaf1: car
-            //  - leaf2: cat
-            "636174",
-            // Value: do
-            // Trie:
-            // root
-            // - branch1: ca
-            //  - leaf1: car
-            //  - leaf2: cat
-            // - leaf3: do
-            "646f",
-            // Value: dog
-            // Trie:
-            // root
-            // - branch1: ca
-            //  - leaf1: car
-            //  - leaf2: cat
-            // - branch2: do
-            //  - leaf3: do
-            //  - leaf4: dog
-            "646f67",
-            // Value: do
-            // Trie:
-            // root
-            // - branch1: ca
-            //  - leaf1: car
-            //  - leaf2: cat
-            // - branch2: do
-            //  - leaf3: do
-            //  - branch3: dog
-            //   - leaf4: dog
-            //   - leaf5: dogs
-            "646f6773",
-        ];
-        data.iter().for_each(|key| {
-            let mut key = hex::decode(key).unwrap();
-            key.resize(32, 0);
+        // We have 1 branch node update to be stored at 0x01, indicated by the first nibble.
+        // That branch root node has 2 branch node children present at 0x1 and 0x2.
+        // - 0x1 branch: It has the 2 empty items, at `0` and `1`.
+        // - 0x2 branch: It has the 2 empty items, at `0` and `2`.
+        // This is enough information to construct the intermediate node value:
+        // 1. State Mask: 0b111. The children of the branch + the branch value at `0`, `1` and `2`.
+        // 2. Hash Mask: 0b110. Of the above items, `1` and `2` correspond to sub-branch nodes.
+        // 3. Tree Mask: 0b000.
+        // 4. Hashes: The 2 sub-branch roots, at `1` and `2`, calculated by hashing
+        // the 0th and 1st element for the 0x1 branch (according to the 3rd nibble),
+        // and the 0th and 2nd element for the 0x2 branch (according to the 3rd nibble).
+        // This basically means that every BranchNodeCompact is capable of storing up to 2 levels
+        // deep of nodes (?).
+        let data = BTreeMap::from([
+            (
+                hex!("1000000000000000000000000000000000000000000000000000000000000000").to_vec(),
+                Vec::new(),
+            ),
+            (
+                hex!("1100000000000000000000000000000000000000000000000000000000000000").to_vec(),
+                Vec::new(),
+            ),
+            (
+                hex!("1110000000000000000000000000000000000000000000000000000000000000").to_vec(),
+                Vec::new(),
+            ),
+            (
+                hex!("1200000000000000000000000000000000000000000000000000000000000000").to_vec(),
+                Vec::new(),
+            ),
+            (
+                hex!("1220000000000000000000000000000000000000000000000000000000000000").to_vec(),
+                Vec::new(),
+            ),
+            (
+                // unrelated leaf
+                hex!("1320000000000000000000000000000000000000000000000000000000000000").to_vec(),
+                Vec::new(),
+            ),
+        ]);
+        data.iter().for_each(|(key, val)| {
             let nibbles = Nibbles::unpack(key);
-            hb.add_leaf(nibbles, &[]);
+            hb.add_leaf(nibbles, val.as_ref());
         });
         let root = hb.root();
         drop(hb);
 
-        assert_eq!(
-            root,
-            trie_root(data.iter().map(|key| {
-                let mut key = hex::decode(key).unwrap();
-                key.resize(32, 0);
-                (key, &[])
-            }))
-        );
+        let receiver = UnboundedReceiverStream::new(recv);
+        let updates = receiver.collect::<Vec<_>>().await;
+
+        let updates = updates.iter().cloned().collect::<BTreeMap<_, _>>();
+        dbg!(&updates);
+        let update = updates.get(&Nibbles::from(hex!("01"))).unwrap();
+        assert_eq!(update.state_mask, 0b1111); // 1st nibble: 0, 1, 2, 3
+        assert_eq!(update.tree_mask, 0);
+        assert_eq!(update.hash_mask, 6); // in the 1st nibble, the ones with 1 and 2 are branches with `hashes`
+        assert_eq!(update.hashes.len(), 2); // calculated while the builder is running
+
+        assert_eq!(root, trie_root(data));
     }
+
     #[test]
     fn test_root_raw_data() {
         reth_tracing::init_test_tracing();
