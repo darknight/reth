@@ -194,14 +194,15 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
             HashBuilder::default().with_branch_node_sender(account_branch_node_tx);
 
         while let Some(key) = walker.key() {
+            let key = Nibbles::unpack(key);
+            let span = tracing::trace_span!("prefix", ?key);
+            let _enter = span.enter();
+
             if walker.can_skip_state {
-                let key = Nibbles::unpack(key);
-                tracing::info!(?key, "skipping state");
-                hash_builder.add_branch_from_db(
-                    key,
-                    walker.hash().clone().unwrap(),
-                    walker.children_are_in_trie(),
-                );
+                let value = walker.hash().clone().unwrap();
+                let is_in_db_trie = walker.children_are_in_trie();
+                tracing::trace!(target: "loader", ?value, is_in_db_trie, "skipping state");
+                hash_builder.add_branch_from_db(key, value, is_in_db_trie);
             }
 
             let seek_key = match walker.first_uncovered_prefix() {
@@ -210,7 +211,7 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
                     H256::from_slice(uncovered.as_slice())
                 }
                 None => {
-                    tracing::info!("skipping, no prefix");
+                    tracing::trace!(target: "loader", "skipping, no prefix");
                     break
                 }
             };
@@ -226,7 +227,7 @@ impl<'a, 'tx, TX: DbTx<'tx> + DbTxMut<'tx>> StateRoot<'a, TX> {
 
                 if let Some(ref key) = trie_key {
                     if Nibbles::from(key.as_slice()) < unpacked_key {
-                        tracing::info!("breaking, already detected");
+                        tracing::trace!(target: "loader", "breaking, already detected");
                         break
                     }
                 }
@@ -481,7 +482,14 @@ mod tests {
     ) {
         let hashed_address = keccak256(address);
         tx.put::<tables::HashedAccount>(hashed_address, account).unwrap();
+        insert_storage(tx, hashed_address, storage);
+    }
 
+    fn insert_storage<'a, TX: DbTxMut<'a>>(
+        tx: &mut TX,
+        hashed_address: H256,
+        storage: &BTreeMap<H256, U256>,
+    ) {
         for (k, v) in storage {
             tx.put::<tables::HashedStorage>(
                 hashed_address,
@@ -624,6 +632,79 @@ mod tests {
         let got = StorageRoot::new(tx.deref_mut(), address, None).root().await.unwrap();
 
         assert_eq!(storage_root(storage.into_iter()), got);
+    }
+
+    // Helper for finding slots with the same prefix
+    fn slot_starts_with_hash(prefix: &[u8], mut i: u64) -> (H256, u64) {
+        loop {
+            let slot = H256::from_low_u64_be(i);
+            let hash = keccak256(slot);
+            if hash.starts_with(prefix) {
+                // Return the found slot and the next index to start searching
+                // from to find more slots
+                return (slot, i + 1)
+            }
+            i += 1;
+        }
+    }
+
+    #[tokio::test]
+    // This ensures that the walker goes over all the storage slots
+    async fn test_storage_root_incremental() {
+        let db = create_test_rw_db();
+        let mut tx = Transaction::new(db.as_ref()).unwrap();
+
+        use hex_literal::hex;
+
+        let hashed_address = H256::random();
+        let (slot1, i) = slot_starts_with_hash(&hex!("caba"), 0);
+        let (slot2, _) = slot_starts_with_hash(&hex!("caba"), i);
+        dbg!(&slot1, slot2);
+        dbg!(&keccak256(slot1));
+        dbg!(&keccak256(slot2));
+        dbg!(&Nibbles::unpack(keccak256(slot1)));
+        dbg!(&Nibbles::unpack(keccak256(slot2)));
+
+        let storage = BTreeMap::from([
+            (H256::zero(), U256::from(3)),
+            // create two nodes with a shared prefix to insert an intermediate node
+            (slot1, U256::from(1)),
+            (slot2, U256::from(1)),
+        ]);
+
+        insert_storage(&mut *tx, hashed_address, &storage);
+        tx.commit().unwrap();
+
+        // create channel to get the storagetrie updates and write them to storage trie
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let loader = StorageRoot::new_hashed(tx.deref_mut(), hashed_address, Some(sender));
+        let got = loader.root().await.unwrap();
+        drop(loader);
+
+        // Check account trie
+        let receiver = UnboundedReceiverStream::new(receiver);
+        let updates = receiver.collect::<Vec<_>>().await;
+        let updates = updates
+            .iter()
+            .map(|u| {
+                if let BranchNodeUpdate::Storage(hashed_address, nibbles, node) = u {
+                    (hashed_address, nibbles, node)
+                } else {
+                    panic!("Unexpected update")
+                }
+            })
+            .collect::<Vec<_>>();
+        dbg!(&updates);
+        // assert_eq!(updates.len(), 2);
+
+        // assert_eq!(storage_root(storage.clone().into_iter()), got);
+
+        // // change the storage commit new root
+        // let mut storage = storage;
+        // storage.insert(&H256::from_low_u64_be(2), U256::from(2));
+        // insert_account(&mut *tx, address, account.clone(), &storage);
+        // tx.commit().unwrap();
+        // let got = StorageRoot::new(tx.deref_mut(), address, None).root().await.unwrap();
     }
 
     type State = BTreeMap<Address, (Account, BTreeMap<H256, U256>)>;
@@ -1102,7 +1183,7 @@ mod tests {
             })
             .collect::<BTreeMap<_, _>>();
 
-        assert_account_updates(&account_updates);
+        assert_trie_updates(&account_updates);
     }
 
     #[tokio::test]
@@ -1131,10 +1212,78 @@ mod tests {
             );
         }
 
-        assert_account_updates(&account_updates);
+        assert_trie_updates(&account_updates);
     }
 
     use reth_db::mdbx::{Env, WriteMap};
+
+    #[tokio::test]
+    async fn storage_trie_around_extension_node() {
+        let db = create_test_rw_db();
+        let mut tx = Transaction::new(db.as_ref()).unwrap();
+
+        let hashed_address = H256::random();
+        let (expected_root, expected_updates) =
+            extension_node_storage_trie(&mut tx, hashed_address).await;
+
+        let (sender, recv) = mpsc::unbounded_channel();
+        let loader = StorageRoot::new_hashed(tx.deref_mut(), hashed_address, Some(sender));
+        let got = loader.root().await.unwrap();
+        assert_eq!(expected_root, got);
+
+        // Check account trie
+        drop(loader);
+        let branch_node_stream = UnboundedReceiverStream::new(recv);
+        let updates = branch_node_stream.collect::<Vec<_>>().await;
+
+        let storage_updates = updates
+            .into_iter()
+            .filter_map(|u| {
+                if let BranchNodeUpdate::Storage(_, nibbles, node) = u {
+                    Some((nibbles, node))
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(expected_updates, storage_updates);
+
+        assert_trie_updates(&storage_updates);
+    }
+
+    use hex_literal::hex;
+
+    async fn extension_node_storage_trie(
+        tx: &mut Transaction<'_, Env<WriteMap>>,
+        hashed_address: H256,
+    ) -> (H256, BTreeMap<Nibbles, BranchNodeCompact>) {
+        let value = U256::from(1);
+
+        let mut hashed_storage = tx.cursor_write::<tables::HashedStorage>().unwrap();
+
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let mut hb = HashBuilder::new(Some(sender));
+
+        for key in [
+            hex!("30af561000000000000000000000000000000000000000000000000000000000"),
+            hex!("30af569000000000000000000000000000000000000000000000000000000000"),
+            hex!("30af650000000000000000000000000000000000000000000000000000000000"),
+            hex!("30af6f0000000000000000000000000000000000000000000000000000000000"),
+            hex!("30af8f0000000000000000000000000000000000000000000000000000000000"),
+            hex!("3100000000000000000000000000000000000000000000000000000000000000"),
+        ] {
+            hashed_storage.upsert(hashed_address, StorageEntry { key: H256(key), value }).unwrap();
+            hb.add_leaf(Nibbles::unpack(&key), &reth_rlp::encode_fixed_size(&value));
+        }
+        let root = hb.root();
+
+        drop(hb);
+        let branch_node_stream = UnboundedReceiverStream::new(receiver);
+        let updates = branch_node_stream.collect::<Vec<_>>().await;
+        let updates = updates.iter().cloned().collect();
+
+        (root, updates)
+    }
 
     fn extension_node_trie(tx: &mut Transaction<'_, Env<WriteMap>>) -> H256 {
         let mut hashed_accounts = tx.cursor_write::<tables::HashedAccount>().unwrap();
@@ -1167,7 +1316,7 @@ mod tests {
         hb.root()
     }
 
-    fn assert_account_updates(account_updates: &BTreeMap<Nibbles, BranchNodeCompact>) {
+    fn assert_trie_updates(account_updates: &BTreeMap<Nibbles, BranchNodeCompact>) {
         assert_eq!(account_updates.len(), 2);
 
         let node = account_updates.get(&Nibbles::from(vec![0x3])).unwrap();
